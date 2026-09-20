@@ -5,6 +5,14 @@ use Illuminate\Http\Request;
 
 define('LARAVEL_START', microtime(true));
 
+// This is a JSON API - PHP-level warnings/notices/deprecations (e.g. PHP 8.4
+// deprecation notices from vendor packages) must never be echoed directly
+// into the response body, or they corrupt it into invalid JSON (observed as
+// "<br /><b>...</b>" prefixed onto otherwise-valid responses). Laravel's own
+// exception handling/logging is unaffected by this - it only stops PHP's
+// native error output.
+ini_set('display_errors', '0');
+
 /*
 |--------------------------------------------------------------------------
 | Check If The Application Is Under Maintenance
