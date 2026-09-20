@@ -438,11 +438,11 @@ class PaymentController extends Controller
             ]);
 
             if ($validator->fails()) {
-                Log::error('M-Pesa callback validation failed', ['errors' => $validator->errors()]);
+                Log::error('M-Pesa callback validation failed', ['message' => $validator->errors(), 'errors' => $validator->errors()]);
                 return response()->json([
                     'status' => 'failed',
                     'message' => 'Invalid callback data',
-                    'errors' => $validator->errors(),
+                    'message' => $validator->errors(), 'errors' => $validator->errors(),
                 ], 400);
             }
 

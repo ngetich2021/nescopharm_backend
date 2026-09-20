@@ -255,7 +255,7 @@ class ProductReceiptController extends Controller
             ]);
             if ($validator->fails()) {
                 DB::rollBack();
-                return response()->json(['status' => 'failed', 'errors' => $validator->errors()], 422);
+                return response()->json(['status' => 'failed', 'message' => $validator->errors(), 'errors' => $validator->errors()], 422);
             }
 
             // Update main receipt fields
@@ -586,7 +586,7 @@ class ProductReceiptController extends Controller
                 ]);
                 if ($validator->fails()) {
                     DB::rollBack();
-                    return response()->json(['status' => 'failed', 'errors' => $validator->errors()], 422);
+                    return response()->json(['status' => 'failed', 'message' => $validator->errors(), 'errors' => $validator->errors()], 422);
                 }
 
                 // Create product receipt
@@ -1000,7 +1000,7 @@ class ProductReceiptController extends Controller
                 return response()->json([
                     'status' => 'error',
                     'message' => 'Validation failed',
-                    'errors' => $validator->errors()
+                    'message' => $validator->errors(), 'errors' => $validator->errors()
                 ], 422);
             }
 

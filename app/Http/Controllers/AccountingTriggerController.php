@@ -113,7 +113,7 @@ class AccountingTriggerController extends Controller
             return response()->json([
                 'success' => false,
                 'message' => 'Validation failed',
-                'errors' => $validator->errors(),
+                'message' => $validator->errors(), 'errors' => $validator->errors(),
             ], 422);
         }
 
@@ -216,7 +216,7 @@ class AccountingTriggerController extends Controller
                 return response()->json([
                     'success' => false,
                     'message' => 'Validation failed',
-                    'errors' => $validator->errors(),
+                    'message' => $validator->errors(), 'errors' => $validator->errors(),
                 ], 422);
             }
 
@@ -283,7 +283,7 @@ class AccountingTriggerController extends Controller
             return response()->json([
                 'success' => false,
                 'message' => 'Validation failed',
-                'errors' => $validator->errors(),
+                'message' => $validator->errors(), 'errors' => $validator->errors(),
             ], 422);
         }
 
@@ -516,7 +516,7 @@ class AccountingTriggerController extends Controller
             return response()->json([
                 'success' => false,
                 'message' => 'Validation failed',
-                'errors' => $validator->errors(),
+                'message' => $validator->errors(), 'errors' => $validator->errors(),
             ], 422);
         }
 

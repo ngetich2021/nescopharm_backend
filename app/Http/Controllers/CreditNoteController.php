@@ -118,7 +118,7 @@ class CreditNoteController extends Controller
         ]);
 
         if ($validator->fails()) {
-            return response()->json(['errors' => $validator->errors()], 422);
+            return response()->json(['message' => $validator->errors(), 'errors' => $validator->errors()], 422);
         }
 
         try {
@@ -259,7 +259,7 @@ class CreditNoteController extends Controller
         ]);
 
         if ($validator->fails()) {
-            return response()->json(['errors' => $validator->errors()], 422);
+            return response()->json(['message' => $validator->errors(), 'errors' => $validator->errors()], 422);
         }
 
         try {
@@ -466,7 +466,7 @@ class CreditNoteController extends Controller
         ]);
 
         if ($validator->fails()) {
-            return response()->json(['errors' => $validator->errors()], 422);
+            return response()->json(['message' => $validator->errors(), 'errors' => $validator->errors()], 422);
         }
 
         $creditNote = CreditNote::where('company_id', $companyId)->findOrFail($id);
@@ -575,7 +575,7 @@ class CreditNoteController extends Controller
         ]);
 
         if ($validator->fails()) {
-            return response()->json(['errors' => $validator->errors()], 422);
+            return response()->json(['message' => $validator->errors(), 'errors' => $validator->errors()], 422);
         }
 
         $creditNote = CreditNote::where('company_id', $companyId)->findOrFail($id);

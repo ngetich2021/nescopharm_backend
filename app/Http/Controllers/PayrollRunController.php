@@ -157,7 +157,7 @@ class PayrollRunController extends Controller
             return response()->json([
                 'status' => 'failed',
                 'message' => 'Validation failed.',
-                'errors' => $validator->errors(),
+                'message' => $validator->errors(), 'errors' => $validator->errors(),
             ], 400);
         }
 
@@ -620,7 +620,7 @@ class PayrollRunController extends Controller
                 return response()->json([
                     'status' => 'failed',
                     'message' => 'Validation failed.',
-                    'errors' => $validator->errors(),
+                    'message' => $validator->errors(), 'errors' => $validator->errors(),
                 ], 400);
             }
 

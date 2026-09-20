@@ -185,7 +185,7 @@ class SopController extends Controller
         ]);
 
         if ($validator->fails()) {
-            return response()->json(['errors' => $validator->errors()], 422);
+            return response()->json(['message' => $validator->errors(), 'errors' => $validator->errors()], 422);
         }
 
         $assignmentError = $this->ensureAssignedUpdaterIsValid($companyId, $request->assigned_updater_id);
@@ -306,7 +306,7 @@ class SopController extends Controller
         ]);
 
         if ($validator->fails()) {
-            return response()->json(['errors' => $validator->errors()], 422);
+            return response()->json(['message' => $validator->errors(), 'errors' => $validator->errors()], 422);
         }
 
         if ($request->has('assigned_updater_id')) {
@@ -710,7 +710,7 @@ class SopController extends Controller
         ]);
 
         if ($validator->fails()) {
-            return response()->json(['errors' => $validator->errors()], 422);
+            return response()->json(['message' => $validator->errors(), 'errors' => $validator->errors()], 422);
         }
 
         $sop = Sop::where('company_id', $companyId)->findOrFail($id);

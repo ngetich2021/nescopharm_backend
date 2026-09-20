@@ -81,7 +81,7 @@ class RequisitionController extends Controller
             return response()->json([
                 'status' => 'failed',
                 'message' => 'Validation failed.' . $validator->errors(),
-                'errors' => $validator->errors()
+                'message' => $validator->errors(), 'errors' => $validator->errors()
             ], 422);
         }
         $validated = $validator->validated();
@@ -283,7 +283,7 @@ class RequisitionController extends Controller
             return response()->json([
                 'status' => 'failed',
                 'message' => 'Validation failed: ' . $firstError,
-                'errors' => $validator->errors()
+                'message' => $validator->errors(), 'errors' => $validator->errors()
             ], 422);
         }
         $validated = $validator->validated();

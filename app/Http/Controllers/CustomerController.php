@@ -191,7 +191,7 @@ class CustomerController extends Controller
                 ]);
                 if ($validator->fails()) {
                     DB::rollBack();
-                    return response()->json(['status' => 'failed', 'errors' => $validator->errors()], 422);
+                    return response()->json(['status' => 'failed', 'message' => $validator->errors()], 422);
                 }
 
                 // A Sales Rep creating a customer starts a two-stage credit-approval

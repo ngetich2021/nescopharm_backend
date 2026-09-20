@@ -124,7 +124,7 @@ class SopAnnexureEntryController extends Controller
         ]);
 
         if ($validator->fails()) {
-            return response()->json(['errors' => $validator->errors()], 422);
+            return response()->json(['message' => $validator->errors(), 'errors' => $validator->errors()], 422);
         }
 
         $alreadyExists = SopAnnexureEntry::where('sop_annexure_id', $annexure->id)
@@ -183,7 +183,7 @@ class SopAnnexureEntryController extends Controller
         ]);
 
         if ($validator->fails()) {
-            return response()->json(['errors' => $validator->errors()], 422);
+            return response()->json(['message' => $validator->errors(), 'errors' => $validator->errors()], 422);
         }
 
         $updateData = $request->only(['entry_date', 'data_payload', 'metadata']);

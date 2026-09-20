@@ -45,7 +45,7 @@ class MpesaTransactionController extends Controller
             return response()->json([
                 'status' => 'failed',
                 'message' => 'Validation error',
-                'errors' => $validator->errors()
+                'message' => $validator->errors(), 'errors' => $validator->errors()
             ], 422);
         }
 
@@ -200,7 +200,7 @@ class MpesaTransactionController extends Controller
             return response()->json([
                 'status' => 'failed',
                 'message' => 'Validation error',
-                'errors' => $validator->errors()
+                'message' => $validator->errors(), 'errors' => $validator->errors()
             ], 422);
         }
 

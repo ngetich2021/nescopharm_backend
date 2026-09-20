@@ -1695,7 +1695,7 @@ class ProductController extends Controller
         if ($validator->fails()) {
             return response()->json([
                 'status' => 'failed',
-                'errors' => $validator->errors()
+                'message' => $validator->errors(), 'errors' => $validator->errors()
             ], 422);
         }
 
@@ -1851,7 +1851,7 @@ class ProductController extends Controller
         if ($validator->fails()) {
             return response()->json([
                 'status' => 'failed',
-                'errors' => $validator->errors()
+                'message' => $validator->errors(), 'errors' => $validator->errors()
             ], 422);
         }
 
@@ -1919,7 +1919,7 @@ class ProductController extends Controller
         if ($validator->fails()) {
             return response()->json([
                 'status' => 'failed',
-                'errors' => $validator->errors()
+                'message' => $validator->errors(), 'errors' => $validator->errors()
             ], 422);
         }
 
@@ -2012,7 +2012,7 @@ class ProductController extends Controller
         if ($validator->fails()) {
             return response()->json([
                 'status' => 'failed',
-                'errors' => $validator->errors()
+                'message' => $validator->errors(), 'errors' => $validator->errors()
             ], 422);
         }
 
@@ -2111,7 +2111,7 @@ class ProductController extends Controller
         if ($validator->fails()) {
             return response()->json([
                 'status' => 'failed',
-                'errors' => $validator->errors()
+                'message' => $validator->errors(), 'errors' => $validator->errors()
             ], 422);
         }
 
@@ -2402,7 +2402,7 @@ class ProductController extends Controller
         if ($validator->fails()) {
             return response()->json([
                 'status' => 'failed',
-                'errors' => $validator->errors()
+                'message' => $validator->errors(), 'errors' => $validator->errors()
             ], 422);
         }
 
@@ -2703,7 +2703,7 @@ class ProductController extends Controller
         if ($validator->fails()) {
             return response()->json([
                 'status' => 'failed',
-                'errors' => $validator->errors()
+                'message' => $validator->errors(), 'errors' => $validator->errors()
             ], 422);
         }
 
@@ -2814,7 +2814,7 @@ class ProductController extends Controller
         if ($validator->fails()) {
             return response()->json([
                 'status' => 'failed',
-                'errors' => $validator->errors()
+                'message' => $validator->errors(), 'errors' => $validator->errors()
             ], 422);
         }
 
@@ -2952,7 +2952,7 @@ class ProductController extends Controller
                 return response()->json([
                     'status' => 'error',
                     'message' => 'Validation failed',
-                    'errors' => $validator->errors()
+                    'message' => $validator->errors(), 'errors' => $validator->errors()
                 ], 422);
             }
 
@@ -3111,7 +3111,7 @@ class ProductController extends Controller
                 return response()->json([
                     'status' => 'error',
                     'message' => 'Validation failed',
-                    'errors' => $validator->errors()
+                    'message' => $validator->errors(), 'errors' => $validator->errors()
                 ], 422);
             }
 
@@ -3166,7 +3166,7 @@ class ProductController extends Controller
                 return response()->json([
                     'status' => 'error',
                     'message' => 'Validation failed',
-                    'errors' => $validator->errors()
+                    'message' => $validator->errors(), 'errors' => $validator->errors()
                 ], 422);
             }
 
@@ -3221,7 +3221,7 @@ class ProductController extends Controller
                 return response()->json([
                     'status' => 'error',
                     'message' => 'Validation failed',
-                    'errors' => $validator->errors()
+                    'message' => $validator->errors(), 'errors' => $validator->errors()
                 ], 422);
             }
 
@@ -3391,7 +3391,7 @@ class ProductController extends Controller
                 return response()->json([
                     'status' => 'error',
                     'message' => 'Validation failed',
-                    'errors' => $validator->errors()
+                    'message' => $validator->errors(), 'errors' => $validator->errors()
                 ], 422);
             }
 
@@ -3481,7 +3481,7 @@ class ProductController extends Controller
                 return response()->json([
                     'status' => 'error',
                     'message' => 'Validation failed',
-                    'errors' => $validator->errors()
+                    'message' => $validator->errors(), 'errors' => $validator->errors()
                 ], 422);
             }
 
@@ -3592,7 +3592,7 @@ class ProductController extends Controller
                 return response()->json([
                     'status' => 'error',
                     'message' => 'Validation failed',
-                    'errors' => $validator->errors()
+                    'message' => $validator->errors(), 'errors' => $validator->errors()
                 ], 422);
             }
 

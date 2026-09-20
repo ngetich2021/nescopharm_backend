@@ -100,7 +100,7 @@ class CompanyDispatchSettingsController extends Controller
             return response()->json([
                 'success' => false,
                 'message' => 'Validation error',
-                'errors' => $validator->errors(),
+                'message' => $validator->errors(), 'errors' => $validator->errors(),
             ], 422);
         }
 

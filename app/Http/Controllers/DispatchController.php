@@ -256,7 +256,7 @@ class DispatchController extends Controller
             return response()->json([
                 'status' => 'failed',
                 'message' => 'Validation failed: ' . $firstError,
-                'errors' => $validator->errors()
+                'message' => $validator->errors(), 'errors' => $validator->errors()
             ], 422);
         }
 
@@ -458,7 +458,7 @@ class DispatchController extends Controller
             return response()->json([
                 'status' => 'failed',
                 'message' => 'Validation failed.',
-                'errors' => $validator->errors()
+                'message' => $validator->errors(), 'errors' => $validator->errors()
             ], 422);
         }
         DB::beginTransaction();

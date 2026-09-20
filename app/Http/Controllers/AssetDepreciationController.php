@@ -93,7 +93,7 @@ class AssetDepreciationController extends Controller
             'reference' => 'nullable|string|max:255',
         ]);
         if ($validator->fails()) {
-            return response()->json(['errors' => $validator->errors()], 422);
+            return response()->json(['message' => $validator->errors(), 'errors' => $validator->errors()], 422);
         }
         try {
             DB::beginTransaction();
@@ -167,7 +167,7 @@ class AssetDepreciationController extends Controller
         ]);
 
         if ($validator->fails()) {
-            return response()->json(['errors' => $validator->errors()], 422);
+            return response()->json(['message' => $validator->errors(), 'errors' => $validator->errors()], 422);
         }
 
         try {
@@ -260,7 +260,7 @@ class AssetDepreciationController extends Controller
         ]);
 
         if ($validator->fails()) {
-            return response()->json(['errors' => $validator->errors()], 422);
+            return response()->json(['message' => $validator->errors(), 'errors' => $validator->errors()], 422);
         }
 
         try {

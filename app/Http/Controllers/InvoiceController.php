@@ -154,7 +154,7 @@ class InvoiceController extends Controller
         ]);
 
         if ($validator->fails()) {
-            return response()->json(['errors' => $validator->errors()], 422);
+            return response()->json(['message' => $validator->errors(), 'errors' => $validator->errors()], 422);
         }
 
         $invoice = Invoice::where('company_id', $user->company_id)->findOrFail($id);
@@ -256,7 +256,7 @@ class InvoiceController extends Controller
         ]);
 
         if ($validator->fails()) {
-            return response()->json(['errors' => $validator->errors()], 422);
+            return response()->json(['message' => $validator->errors(), 'errors' => $validator->errors()], 422);
         }
 
         try {
@@ -443,7 +443,7 @@ class InvoiceController extends Controller
         ]);
 
         if ($validator->fails()) {
-            return response()->json(['errors' => $validator->errors()], 422);
+            return response()->json(['message' => $validator->errors(), 'errors' => $validator->errors()], 422);
         }
 
         try {
@@ -575,7 +575,7 @@ class InvoiceController extends Controller
         ]);
 
         if ($validator->fails()) {
-            return response()->json(['errors' => $validator->errors()], 422);
+            return response()->json(['message' => $validator->errors(), 'errors' => $validator->errors()], 422);
         }
 
         try {
@@ -722,7 +722,7 @@ class InvoiceController extends Controller
         ]);
 
         if ($validator->fails()) {
-            return response()->json(['errors' => $validator->errors()], 422);
+            return response()->json(['message' => $validator->errors(), 'errors' => $validator->errors()], 422);
         }
 
         try {
@@ -879,7 +879,7 @@ class InvoiceController extends Controller
         ]);
 
         if ($validator->fails()) {
-            return response()->json(['errors' => $validator->errors()], 422);
+            return response()->json(['message' => $validator->errors(), 'errors' => $validator->errors()], 422);
         }
 
         if (strtolower((string) $request->payment_method) === 'cheque') {
@@ -1108,7 +1108,7 @@ class InvoiceController extends Controller
         ]);
 
         if ($validator->fails()) {
-            return response()->json(['errors' => $validator->errors()], 422);
+            return response()->json(['message' => $validator->errors(), 'errors' => $validator->errors()], 422);
         }
 
         try {
