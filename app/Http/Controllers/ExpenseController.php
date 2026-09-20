@@ -82,7 +82,7 @@ class ExpenseController extends Controller
             }
 
             if ($request->filled('vendor_name')) {
-                $query->where('vendor_name', 'like', '%' . $request->input('vendor_name') . '%');
+                $query->where('vendor_name', 'ilike', '%' . $request->input('vendor_name') . '%');
             }
 
             if ($request->filled('payment_method')) {
@@ -125,9 +125,9 @@ class ExpenseController extends Controller
             if ($request->filled('search')) {
                 $search = $request->input('search');
                 $query->where(function ($q) use ($search) {
-                    $q->where('vendor_name', 'like', '%' . $search . '%')
-                      ->orWhere('description', 'like', '%' . $search . '%')
-                      ->orWhere('notes', 'like', '%' . $search . '%');
+                    $q->where('vendor_name', 'ilike', '%' . $search . '%')
+                      ->orWhere('description', 'ilike', '%' . $search . '%')
+                      ->orWhere('notes', 'ilike', '%' . $search . '%');
                 });
             }
 

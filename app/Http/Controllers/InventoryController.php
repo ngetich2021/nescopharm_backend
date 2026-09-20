@@ -129,7 +129,7 @@ class InventoryController extends Controller
             }
 
             if ($request->has('batch_number')) {
-                $query->where('batch_number', 'like', '%' . $request->batch_number . '%');
+                $query->where('batch_number', 'ilike', '%' . $request->batch_number . '%');
             }
 
             // Sorting

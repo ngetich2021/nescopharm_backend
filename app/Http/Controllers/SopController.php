@@ -148,8 +148,8 @@ class SopController extends Controller
         if ($request->filled('search')) {
             $search = trim((string) $request->search);
             $query->where(function ($q) use ($search) {
-                $q->where('title', 'like', '%' . $search . '%')
-                    ->orWhere('sop_number', 'like', '%' . $search . '%');
+                $q->where('title', 'ilike', '%' . $search . '%')
+                    ->orWhere('sop_number', 'ilike', '%' . $search . '%');
             });
         }
 

@@ -21,6 +21,8 @@ class CustomerAccountApproval extends Model
         'approval_type',
         'previous_credit_limit',
         'new_credit_limit',
+        'previous_credit_days',
+        'new_credit_days',
         'metadata',
     ];
 
@@ -28,6 +30,8 @@ class CustomerAccountApproval extends Model
         'metadata' => 'json',
         'previous_credit_limit' => 'decimal:2',
         'new_credit_limit' => 'decimal:2',
+        'previous_credit_days' => 'integer',
+        'new_credit_days' => 'integer',
         'approved_at' => 'datetime',
     ];
 

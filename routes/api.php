@@ -57,6 +57,7 @@ use App\Models\User;
 use Illuminate\Support\Facades\Log;
 use App\Http\Controllers\CompanyMpesaConfigController;
 use App\Http\Controllers\InvoiceController;
+use App\Http\Controllers\ChequeController;
 use App\Http\Controllers\CreditNoteController;
 use App\Http\Controllers\ProductCategoryController;
 // Dashboard Controllers
@@ -69,7 +70,9 @@ use App\Http\Controllers\RepairController;
 use App\Http\Controllers\PermissionController;
 use App\Http\Controllers\CustomerAccountController;
 use App\Http\Controllers\CustomerAccountApprovalController;
+use App\Http\Controllers\CustomerApprovalController;
 use App\Http\Controllers\DocumentController;
+use App\Http\Controllers\MediaController;
 use App\Http\Controllers\SopController;
 use App\Http\Controllers\SopAnnexureController;
 use App\Http\Controllers\SopAnnexureEntryController;
@@ -81,6 +84,12 @@ Route::pattern('payroll', '[0-9a-fA-F\-]{36}');
 
 Route::post('/register', [UserController::class, 'createNewUser']);
 Route::post('/login', [UserController::class, 'login']);
+
+// Company branding assets (logo/letterhead), served with CORS headers so they can
+// load into <img crossorigin> for PDF export. This must be an actual route (not a
+// static public/ file) because php artisan serve serves existing public/ files
+// directly, bypassing all middleware/headers entirely.
+Route::get('/company-assets/{filename}', [CompanyController::class, 'asset']);
 Route::withoutMiddleware([\Laravel\Sanctum\Http\Middleware\EnsureFrontendRequestsAreStateful::class, 'auth:sanctum'])->group(function () {
     Route::post('/users/send-password-reset-link', [UserController::class, 'sendPasswordResetLink']);
     Route::post('/users/{userId}/set-password', [UserController::class, 'setPasswordAfterVerification']);
@@ -260,11 +269,17 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::patch('/update_customer/{customerId}', [CustomerController::class, 'update']);
     Route::match(['patch', 'put'], '/customers/{customerId}', [CustomerController::class, 'update'])->name('customers.update');
     Route::get('/customers/{customer_id}/profile', [CustomerController::class, 'showProfile'])->name('customers.profile');
+    Route::get('/customers/{customerId}/credit-terms', [CustomerController::class, 'creditTerms'])->name('customers.credit-terms');
     Route::delete('/customers/{customerId}', [CustomerController::class, 'destroy'])->name('customers.destroy');
 
     // Customer document routes
     Route::get('/customers/{customerId}/documents', [CustomerController::class, 'getDocuments'])->name('customers.documents.index');
     Route::post('/customers/{customerId}/documents', [CustomerController::class, 'createDocument'])->name('customers.documents.store');
+
+    // Two-stage credit-approval workflow for rep-created customers
+    Route::get('/customers/{customerId}/approvals', [CustomerApprovalController::class, 'index']);
+    Route::post('/customers/{customerId}/approvals', [CustomerApprovalController::class, 'store']);
+    Route::post('/customers/{customerId}/signed-application', [CustomerApprovalController::class, 'uploadSignedApplication']);
 
     // Customer Account routes
     Route::get('/customer-accounts', [CustomerAccountController::class, 'index']);
@@ -287,7 +302,12 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::match(['patch', 'put'], '/documents/{id}', [DocumentController::class, 'update']);
     Route::delete('/documents/{id}', [DocumentController::class, 'destroy']);
 
-    // Company routes 
+    // Generic media upload (used for ad-hoc attachments not tied to an
+    // existing entity yet, e.g. an expense receipt uploaded before the
+    // Expense record is created)
+    Route::post('/media/upload', [MediaController::class, 'upload']);
+
+    // Company routes
     Route::get('/companies', [CompanyController::class, 'getCompanies']);
     Route::post('/companies', [CompanyController::class, 'store']);
     Route::get('/companies/{companyId}', [CompanyController::class, 'show']);
@@ -911,7 +931,17 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('payments/{paymentId}/available-amount', [InvoiceController::class, 'getPaymentAvailableAmount']);
     Route::get('payments/{paymentId}/allocations', [InvoiceController::class, 'getPaymentAllocations']);
     Route::delete('payment-allocations/{allocationId}', [InvoiceController::class, 'deallocatePayment']);
+    Route::get('invoices-sales-reps', [InvoiceController::class, 'getSalesReps']);
+    Route::post('invoices/{id}/assign-rep', [InvoiceController::class, 'assignRep']);
     Route::apiResource('invoices', InvoiceController::class);
+
+    // PD Cheques
+    Route::get('cheques', [ChequeController::class, 'index']);
+    Route::get('cheques/{id}', [ChequeController::class, 'show']);
+    Route::post('cheques', [ChequeController::class, 'store']);
+    Route::post('cheques/{id}/approve', [ChequeController::class, 'approve']);
+    Route::post('cheques/{id}/bounce', [ChequeController::class, 'bounce']);
+    Route::post('cheques/{id}/cancel', [ChequeController::class, 'cancel']);
 
     // Credit Note Routes (linked to invoices)
     Route::get('credit-notes/by-invoice/{invoiceId}', [CreditNoteController::class, 'getByInvoice']);

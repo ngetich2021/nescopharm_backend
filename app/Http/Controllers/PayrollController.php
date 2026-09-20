@@ -140,7 +140,7 @@ class PayrollController extends Controller
         }
         if ($request->filled('search')) {
             $search = $request->input('search');
-            $query->where('payroll_number', 'like', "%{$search}%");
+            $query->where('payroll_number', 'ilike', "%{$search}%");
         }
 
         $perPage = min((int) $request->input('per_page', 15), 100);

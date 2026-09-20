@@ -16,6 +16,7 @@ class StockCountItem extends Model
         'store_id',
         'stock_count_id',
         'product_id',
+        'variant_id',
         'product_name',
         'product_sku',
         'product_category',
@@ -35,6 +36,7 @@ class StockCountItem extends Model
         'store_id' => 'string',
         'stock_count_id' => 'string',
         'product_id' => 'string',
+        'variant_id' => 'string',
         'unit_cost' => 'decimal:2',
         'expected_quantity' => 'integer',
         'counted_quantity' => 'integer',
@@ -56,6 +58,11 @@ class StockCountItem extends Model
     public function product()
     {
         return $this->belongsTo(Product::class);
+    }
+
+    public function variant()
+    {
+        return $this->belongsTo(ProductVariant::class, 'variant_id');
     }
 
     // Boolean mutators for PostgreSQL compatibility

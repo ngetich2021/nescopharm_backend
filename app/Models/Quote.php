@@ -79,6 +79,8 @@ class Quote extends Model
         'id',
         'quote_number',
         'customer_id',
+        'submitted_by_id',
+        'submitted_at',
         'total_amount',
         'status',
         'company_id',
@@ -101,9 +103,20 @@ class Quote extends Model
         'below_minimum_price' => 'boolean',
         'requires_approval' => 'boolean',
         'valid_until' => 'date',
+        'submitted_at' => 'datetime',
         'created_at' => 'datetime',
         'updated_at' => 'datetime',
     ];
+
+    /**
+     * When set, this quote was submitted directly by a Sales Rep from POS
+     * rather than built by staff - shown as "From: {rep} - {time}" until a
+     * can_create_quotes user opens and edits it, which clears this field.
+     */
+    public function submittedBy()
+    {
+        return $this->belongsTo(User::class, 'submitted_by_id');
+    }
 
     public function customer()
     {

@@ -59,16 +59,16 @@ class FixedAssetController extends Controller
         }
 
         if ($request->filled('location')) {
-            $query->where('location', 'like', '%' . $request->input('location') . '%');
+            $query->where('location', 'ilike', '%' . $request->input('location') . '%');
         }
 
         if ($request->filled('search')) {
             $search = $request->input('search');
             $query->where(function ($q) use ($search) {
-                $q->where('asset_name', 'like', '%' . $search . '%')
-                  ->orWhere('asset_tag', 'like', '%' . $search . '%')
-                  ->orWhere('serial_number', 'like', '%' . $search . '%')
-                  ->orWhere('description', 'like', '%' . $search . '%');
+                $q->where('asset_name', 'ilike', '%' . $search . '%')
+                  ->orWhere('asset_tag', 'ilike', '%' . $search . '%')
+                  ->orWhere('serial_number', 'ilike', '%' . $search . '%')
+                  ->orWhere('description', 'ilike', '%' . $search . '%');
             });
         }
 

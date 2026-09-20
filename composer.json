@@ -20,6 +20,7 @@
         "laravel/tinker": "^2.8",
         "league/flysystem-aws-s3-v3": "^3.0",
         "league/iso3166": "^4.3",
+        "phpoffice/phpspreadsheet": "^5.9",
         "predis/predis": "^2.0",
         "pusher/pusher-php-server": "*",
         "resend/resend-laravel": "^0.14.0",

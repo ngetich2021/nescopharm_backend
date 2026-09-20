@@ -61,15 +61,15 @@ class BankAccountController extends Controller
         }
 
         if ($request->filled('bank_name')) {
-            $query->where('bank_name', 'like', '%' . $request->input('bank_name') . '%');
+            $query->where('bank_name', 'ilike', '%' . $request->input('bank_name') . '%');
         }
 
         if ($request->filled('search')) {
             $search = $request->input('search');
             $query->where(function ($q) use ($search) {
-                $q->where('account_name', 'like', '%' . $search . '%')
-                  ->orWhere('account_number', 'like', '%' . $search . '%')
-                  ->orWhere('bank_name', 'like', '%' . $search . '%');
+                $q->where('account_name', 'ilike', '%' . $search . '%')
+                  ->orWhere('account_number', 'ilike', '%' . $search . '%')
+                  ->orWhere('bank_name', 'ilike', '%' . $search . '%');
             });
         }
 

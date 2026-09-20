@@ -20,21 +20,26 @@ use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Arr;
 use Illuminate\Support\Facades\DB;
 use App\Http\Traits\HandlesDatabaseErrors;
+use App\Http\Traits\ChecksStockAvailability;
 use App\Services\PackagingCalculatorService;
+use App\Services\CustomerCreditTermsResolver;
 
 class QuoteController extends Controller
 {
     use HandlesDatabaseErrors;
-    
+    use ChecksStockAvailability;
+
     protected $calculator;
-    
+    protected CustomerCreditTermsResolver $creditTermsResolver;
+
     /**
      * Initialize the controller with middleware for authentication.
      */
-    public function __construct(PackagingCalculatorService $calculator)
+    public function __construct(PackagingCalculatorService $calculator, CustomerCreditTermsResolver $creditTermsResolver)
     {
         $this->middleware('auth:sanctum');
         $this->calculator = $calculator;
+        $this->creditTermsResolver = $creditTermsResolver;
     }
 
     /**
@@ -334,12 +339,19 @@ class QuoteController extends Controller
                 $belowMinimumPriceBool = filter_var($belowMinimumPrice, FILTER_VALIDATE_BOOLEAN);
                 $requiresApprovalBool = filter_var($belowMinimumPrice, FILTER_VALIDATE_BOOLEAN);
 
+                // A Sales Rep submitting a quote from POS gets flagged as such -
+                // shown as "From: {rep} - {time}" until a can_create_quotes user
+                // opens and edits it (see update(), which clears this).
+                $isRepSubmission = (bool) ($user->role->is_sales_rep ?? false);
+
                 // Create quote
                 $quote = Quote::create([
                     'id' => (string) Str::uuid(),
                     'quote_number' => $quoteNumber,
                     'customer_id' => $request->input('customer_id'),
                     'company_id' => $user->company_id,
+                    'submitted_by_id' => $isRepSubmission ? $user->id : null,
+                    'submitted_at' => $isRepSubmission ? now() : null,
                     'total_amount' => $totalAmount,
                     'discount' => $discount,
                     'final_amount' => $finalAmount,
@@ -477,6 +489,14 @@ class QuoteController extends Controller
                     'valid_until' => $request->input('valid_until', $quote->valid_until),
                     'notes' => $request->input('notes', $quote->notes),
                 ]);
+
+                // Once a can_update_quotes-authorized user edits a rep-submitted
+                // quote (see store(), where submitted_by_id is stamped), it
+                // becomes a fully normal quote - clear the "from rep" flag.
+                if ($quote->submitted_by_id) {
+                    $quote->submitted_by_id = null;
+                    $quote->submitted_at = null;
+                }
 
                 // Handle quote items if provided
                 if ($request->has('items')) {
@@ -632,6 +652,10 @@ class QuoteController extends Controller
         $validator = Validator::make($request->all(), [
             'delivery_location_id' => 'nullable|uuid|exists:delivery_locations,id',
             'delivery_instructions' => 'nullable|string',
+            'sales_rep_id' => 'nullable|uuid|exists:users,id',
+            'payment_option' => 'sometimes|in:instant,credit',
+            'payment_terms' => 'nullable|string',
+            'due_date' => 'nullable|date',
         ]);
 
         if ($validator->fails()) {
@@ -648,7 +672,7 @@ class QuoteController extends Controller
             ], 403);
         }
 
-        $quote = Quote::with('quoteItems.product')->find($quoteId);
+        $quote = Quote::with(['quoteItems.product', 'customer'])->find($quoteId);
         if (!$quote) {
             return response()->json([
                 'status' => 'failed',
@@ -692,13 +716,17 @@ class QuoteController extends Controller
                     }
                 }
 
-                // Re-validate stock for all items
+                // Re-validate stock for all items. Check against the variant's own
+                // stock when the line is for a specific variant, not the parent
+                // product's base stock - a product with variants doesn't hold
+                // sellable stock at the base level.
                 foreach ($quote->quoteItems as $index => $item) {
                     $product = $item->product;
-                    if ($product->track_inventory && $item->quantity > $product->stock_quantity) {
+                    $variant = $item->variant_id ? ($item->variant ?? \App\Models\ProductVariant::find($item->variant_id)) : null;
+                    if ($error = $this->insufficientStockMessage($product, $variant, (int) $item->quantity)) {
                         return response()->json([
                             'status' => 'failed',
-                            'message' => "Item at index {$index}: Insufficient stock for product {$product->name} (available: {$product->stock_quantity}).",
+                            'message' => "Item at index {$index}: {$error}",
                         ], 400);
                     }
                 }
@@ -706,11 +734,29 @@ class QuoteController extends Controller
                 // Generate order number
                 $orderNumber = $this->generateOrderNumber($quote->company_id);
 
+                // Work out payment_type/credit_terms_days for the order, same as a
+                // directly-created order: an explicit instant/cash choice on conversion,
+                // otherwise the customer's own registered payment method/terms.
+                $paymentOption = $request->input('payment_option');
+                if ($paymentOption === 'instant' || !$quote->customer) {
+                    $orderCredit = ['payment_type' => 'cash', 'credit_terms_days' => null];
+                } else {
+                    $orderCredit = $this->creditTermsResolver->resolve(
+                        $quote->customer,
+                        now()->toDateString(),
+                        $request->input('due_date'),
+                        $request->input('payment_terms'),
+                    );
+                }
+
                 // Create order
                 $order = Order::create([
                     'id' => (string) Str::uuid(),
                     'order_number' => $orderNumber,
                     'customer_id' => $quote->customer_id,
+                    'sales_rep_id' => $request->input('sales_rep_id'),
+                    'payment_type' => $orderCredit['payment_type'],
+                    'credit_terms_days' => $orderCredit['credit_terms_days'],
                     'total_amount' => $quote->total_amount,
                     'status' => 'pending',
                     'company_id' => $quote->company_id,
@@ -739,9 +785,16 @@ class QuoteController extends Controller
                         'company_id' => $quote->company_id,
                     ]);
 
-                    // Update stock if track_inventory
+                    // Update stock if track_inventory - decrement the variant's own
+                    // stock when the line is for a specific variant, not the parent
+                    // product's base stock.
                     if ($item->product->track_inventory) {
-                        $item->product->decrement('stock_quantity', $item->quantity);
+                        if ($item->variant_id) {
+                            $variant = $item->variant ?? \App\Models\ProductVariant::find($item->variant_id);
+                            $variant?->decrement('stock_quantity', $item->quantity);
+                        } else {
+                            $item->product->decrement('stock_quantity', $item->quantity);
+                        }
                     }
                 }
 
@@ -795,9 +848,14 @@ class QuoteController extends Controller
         try {
             return $this->executeWithRetry(function() use ($request) {
                 $user = $request->user();
-                $query = Quote::with(['customer' => function ($query) {
-                    $query->select('id', 'name', 'email', 'phone');
-                }]);
+                $query = Quote::with([
+                    'customer' => function ($query) {
+                        $query->select('id', 'name', 'email', 'phone');
+                    },
+                    'submittedBy' => function ($query) {
+                        $query->select('id', 'name');
+                    },
+                ]);
 
                 if (!$this->hasPermission($request, 'can_manage_all_quotes')) {
                     $query->where('company_id', $user->company_id);
@@ -815,11 +873,21 @@ class QuoteController extends Controller
                     $query->where('customer_id', $request->input('customer_id'));
                 }
                 if ($request->filled('quote_number')) {
-                    $query->where('quote_number', 'like', '%' . $request->input('quote_number') . '%');
+                    $query->where('quote_number', 'ilike', '%' . $request->input('quote_number') . '%');
+                }
+                if ($request->filled('search')) {
+                    $term = $request->input('search');
+                    $query->where(function ($q) use ($term) {
+                        $q->where('quote_number', 'ilike', "%{$term}%")
+                            ->orWhereHas('customer', function ($cq) use ($term) {
+                                $cq->where('name', 'ilike', "%{$term}%")
+                                    ->orWhere('business_name', 'ilike', "%{$term}%");
+                            });
+                    });
                 }
 
                 $perPage = (int) $request->input('per_page', 20);
-                $quotes = $query->select('id', 'customer_id', 'company_id', 'quote_number', 'total_amount', 'final_amount', 'status', 'valid_until', 'created_at', 'updated_at')
+                $quotes = $query->select('id', 'customer_id', 'company_id', 'quote_number', 'total_amount', 'final_amount', 'status', 'valid_until', 'submitted_by_id', 'submitted_at', 'created_at', 'updated_at')
                     ->orderBy('created_at', 'desc')
                     ->paginate($perPage);
 
@@ -850,6 +918,9 @@ class QuoteController extends Controller
                 ->with([
                     'customer' => function ($query) {
                         $query->select('id', 'name', 'email', 'phone');
+                    },
+                    'submittedBy' => function ($query) {
+                        $query->select('id', 'name');
                     },
                     'deliveryLocation' => function ($query) {
                         $query->select('*');

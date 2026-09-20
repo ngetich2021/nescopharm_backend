@@ -151,10 +151,12 @@ class CustomerAccountApprovalController extends Controller
                 'metadata' => $request->input('metadata', []),
             ];
 
-            // Handle credit limit updates
+            // Handle credit terms updates (limit and/or credit period in days)
             if ($request->input('approval_type') === 'credit_limit_update') {
                 $previousCreditLimit = null;
                 $newCreditLimit = null;
+                $previousCreditDays = null;
+                $newCreditDays = null;
 
                 // Check if this is approving an existing pending request
                 if ($request->has('approval_id')) {
@@ -172,6 +174,8 @@ class CustomerAccountApprovalController extends Controller
                         $approval = $existingApproval;
                         $previousCreditLimit = $existingApproval->previous_credit_limit;
                         $newCreditLimit = $existingApproval->new_credit_limit;
+                        $previousCreditDays = $existingApproval->previous_credit_days;
+                        $newCreditDays = $existingApproval->new_credit_days;
                     }
                 } else {
                     // Manual credit limit approval (legacy support)
@@ -183,28 +187,38 @@ class CustomerAccountApprovalController extends Controller
 
                 // Process the approval/rejection
                 if ($request->input('status') === 'approved') {
-                    // Update the customer account's credit limit
-                    $account->update([
-                        'credit_required' => $newCreditLimit,
-                        'pending_credit_limit' => null // Clear pending limit
-                    ]);
-                    
-                    Log::info('Customer account credit limit updated', [
+                    // Promote the pending terms - this is the ONLY way credit_days
+                    // (used by invoicing to compute due dates) gets updated.
+                    $update = ['pending_credit_limit' => null, 'pending_credit_days' => null];
+                    if (!is_null($newCreditLimit)) {
+                        $update['credit_required'] = $newCreditLimit;
+                    }
+                    if (!is_null($newCreditDays)) {
+                        $update['credit_days'] = $newCreditDays;
+                    }
+                    $account->update($update);
+
+                    Log::info('Customer account credit terms updated', [
                         'customer_account_id' => $customerAccountId,
                         'previous_limit' => $previousCreditLimit,
                         'new_limit' => $newCreditLimit,
+                        'previous_credit_days' => $previousCreditDays,
+                        'new_credit_days' => $newCreditDays,
                         'approved_by' => $user->id
                     ]);
                 } else {
-                    // Rejected - clear pending credit limit
+                    // Rejected - clear pending terms
                     $account->update([
-                        'pending_credit_limit' => null
+                        'pending_credit_limit' => null,
+                        'pending_credit_days' => null,
                     ]);
-                    
-                    Log::info('Customer account credit limit change rejected', [
+
+                    Log::info('Customer account credit terms change rejected', [
                         'customer_account_id' => $customerAccountId,
                         'previous_limit' => $previousCreditLimit,
                         'requested_limit' => $newCreditLimit,
+                        'previous_credit_days' => $previousCreditDays,
+                        'requested_credit_days' => $newCreditDays,
                         'rejected_by' => $user->id
                     ]);
                 }

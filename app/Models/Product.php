@@ -29,6 +29,9 @@ class Product extends Model
         'short_description',
         'price',
         'unit_cost',
+        'shipping_cost',
+        'logistics_cost',
+        'margin_amount',
         'last_price',
         'stock_quantity',
         'low_stock_threshold',
@@ -72,6 +75,9 @@ class Product extends Model
     protected $casts = [
         'price' => 'decimal:2',
         'unit_cost' => 'decimal:2',
+        'shipping_cost' => 'decimal:2',
+        'logistics_cost' => 'decimal:2',
+        'margin_amount' => 'decimal:2',
         'last_price' => 'decimal:2',
         'tax_rate' => 'decimal:2',
         'weight' => 'decimal:2',
@@ -107,6 +113,7 @@ class Product extends Model
     protected $appends = [
         'image_urls',
         'primary_image_url',
+        'minimum_valid_price',
     ];
 
     // Scopes for PostgreSQL boolean queries
@@ -272,6 +279,23 @@ class Product extends Model
     public function variants()
     {
         return $this->hasMany(ProductVariant::class, 'product_id');
+    }
+
+    public function priceTiers()
+    {
+        return $this->hasMany(ProductPriceTier::class, 'product_id');
+    }
+
+    /**
+     * Minimum price allowed for this product (and its variants): landed cost + required margin.
+     * Selling price, last price, and every price tier must be strictly greater than this.
+     */
+    public function getMinimumValidPriceAttribute(): float
+    {
+        return round(
+            (float) $this->unit_cost + (float) $this->shipping_cost + (float) $this->logistics_cost + (float) $this->margin_amount,
+            2
+        );
     }
 
     public function variantsByStore($storeId)

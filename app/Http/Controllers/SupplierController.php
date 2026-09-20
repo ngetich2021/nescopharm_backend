@@ -58,6 +58,16 @@ class SupplierController extends Controller
             }
         }
 
+        if ($request->filled('search')) {
+            $term = $request->input('search');
+            $query->where(function ($q) use ($term) {
+                $q->where('name', 'ilike', "%{$term}%")
+                    ->orWhere('email', 'ilike', "%{$term}%")
+                    ->orWhere('phone', 'ilike', "%{$term}%")
+                    ->orWhere('address', 'ilike', "%{$term}%");
+            });
+        }
+
         $suppliers = $query->orderBy('name')->get();
         return response()->json([
             'status' => 'success',

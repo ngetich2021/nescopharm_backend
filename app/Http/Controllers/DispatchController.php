@@ -2,8 +2,10 @@
 
 namespace App\Http\Controllers;
 
+use App\Http\Traits\ChecksStockAvailability;
 use App\Models\Dispatch;
 use App\Models\Product;
+use App\Models\ProductVariant;
 use App\Models\Store;
 use App\Models\User;
 use Illuminate\Http\Request;
@@ -14,6 +16,7 @@ use Illuminate\Support\Facades\Log;
 
 class DispatchController extends Controller
 {
+    use ChecksStockAvailability;
 
     /**
      * Generate a unique dispatch number for the company.
@@ -612,10 +615,19 @@ class DispatchController extends Controller
                         'message' => 'Total received_quantity exceeds dispatch quantity for item: ' . $item->id
                     ], 422);
                 }
-                // Move from on_hand to stock_quantity on acknowledgment
+                // Move from on_hand to stock_quantity on acknowledgment - defensive
+                // recheck even though stock was already reserved at dispatch creation,
+                // in case it was reduced in between (e.g. by a stock adjustment).
                 $product = $item->product;
                 $variant = $item->variant_id ? \App\Models\ProductVariant::find($item->variant_id) : null;
                 $toAcknowledge = $toReceive;
+                if ($error = $this->insufficientStockMessage($product, $variant, $toAcknowledge)) {
+                    DB::rollBack();
+                    return response()->json([
+                        'status' => 'failed',
+                        'message' => $error,
+                    ], 422);
+                }
                 if ($variant) {
                     $variant->decrement('on_hand', $toAcknowledge);
                     $variant->decrement('stock_quantity', $toAcknowledge);

@@ -43,6 +43,8 @@ class ProductReceipt extends Model
         'reference_number',
         'received_by',
         'store_id',
+        'shipping_cost',
+        'logistics_cost',
         // Additional fields for enhanced receipt management
         'receipt_date',        // Date when receipt was created/processed
         'total_amount',        // Total value of the receipt
@@ -56,6 +58,8 @@ class ProductReceipt extends Model
         'expiry_date' => 'date',
         'receipt_date' => 'date',
         'total_amount' => 'decimal:2',
+        'shipping_cost' => 'decimal:2',
+        'logistics_cost' => 'decimal:2',
     ];
 
       public function supplier()

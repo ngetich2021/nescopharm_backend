@@ -60,6 +60,15 @@ class ProductImageService
                     continue; // Skip this image
                 }
 
+                // Base64 data URI (e.g. "data:image/png;base64,....") - decode and store as a new file
+                if (preg_match('/^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/', $image, $matches)) {
+                    $storedPath = $this->storeBase64Image($matches[1], $matches[2], $type);
+                    if ($storedPath) {
+                        $processedImages[] = $storedPath;
+                    }
+                    continue;
+                }
+
                 // Keep existing path or URL
                 // Normalize to path format if it's a full URL
                 $processedImages[] = $this->normalizeImagePath($image);
@@ -67,6 +76,37 @@ class ProductImageService
         }
 
         return $processedImages;
+    }
+
+    /**
+     * Decode and store a base64-encoded image, returning its storage path (or null on failure).
+     */
+    protected function storeBase64Image(string $mimeType, string $base64Data, string $type): ?string
+    {
+        $extensionMap = [
+            'image/jpeg' => 'jpg',
+            'image/jpg' => 'jpg',
+            'image/png' => 'png',
+            'image/gif' => 'gif',
+            'image/webp' => 'webp',
+        ];
+        $extension = $extensionMap[$mimeType] ?? 'jpg';
+
+        $binary = base64_decode($base64Data, true);
+        if ($binary === false) {
+            Log::warning('Failed to decode base64 image', ['type' => $type]);
+            return null;
+        }
+
+        $path = $this->generateImagePath($type, $extension);
+
+        try {
+            $stored = Storage::disk($this->disk)->put($path, $binary);
+            return $stored ? $path : null;
+        } catch (\Exception $e) {
+            Log::error("Storage upload failed for {$type} base64 image", ['error' => $e->getMessage()]);
+            return null;
+        }
     }
 
     /**

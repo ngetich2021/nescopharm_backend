@@ -11,6 +11,7 @@ use App\Models\PaymentAllocation;
 use App\Models\Product;
 use App\Models\ProductVariant;
 use App\Services\AccountingWorkflowService;
+use App\Services\InvoicePaymentApplicationService;
 use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Support\Facades\DB;
@@ -25,11 +26,13 @@ class InvoiceController extends Controller
     use HandlesDatabaseErrors;
 
     protected AccountingWorkflowService $accountingWorkflow;
+    protected InvoicePaymentApplicationService $paymentApplication;
 
-    public function __construct(AccountingWorkflowService $accountingWorkflow)
+    public function __construct(AccountingWorkflowService $accountingWorkflow, InvoicePaymentApplicationService $paymentApplication)
     {
         $this->middleware('auth:sanctum');
         $this->accountingWorkflow = $accountingWorkflow;
+        $this->paymentApplication = $paymentApplication;
     }
 
     protected function hasPermission(Request $request, $permission, $resourceCompanyId = null)
@@ -85,6 +88,85 @@ class InvoiceController extends Controller
     }
 
     /**
+     * Work out payment_type/credit_terms_days/due_date/payment_terms for a new invoice
+     * from the customer's registered payment method and credit terms, unless the
+     * caller explicitly supplied a due_date/payment_terms to override it.
+     */
+    private function resolveInvoiceCredit(
+        \App\Models\Customer $customer,
+        string $invoiceDate,
+        ?string $explicitDueDate = null,
+        ?string $explicitPaymentTerms = null,
+    ): array {
+        $isCredit = $customer->payment_method === 'credit';
+        $creditDays = $isCredit ? $customer->account?->credit_days : null;
+
+        if ($isCredit) {
+            $days = $creditDays ?? 30;
+            $dueDate = $explicitDueDate ?? \Carbon\Carbon::parse($invoiceDate)->addDays($days)->toDateString();
+            $paymentTerms = $explicitPaymentTerms ?? "Net {$days}";
+        } else {
+            $dueDate = $explicitDueDate ?? $invoiceDate;
+            $paymentTerms = $explicitPaymentTerms ?? 'Due on Receipt';
+        }
+
+        return [
+            'payment_type' => $isCredit ? 'credit' : 'cash',
+            'credit_terms_days' => $isCredit ? $creditDays : null,
+            'due_date' => $dueDate,
+            'payment_terms' => $paymentTerms,
+        ];
+    }
+
+    /**
+     * List users eligible to be assigned as an invoice's sales rep
+     * (users whose role is marked as a sales rep role).
+     */
+    public function getSalesReps(Request $request): JsonResponse
+    {
+        $user = $request->user();
+        if (!$this->hasPermission($request, 'can_view_invoices', $user->company_id)) {
+            return response()->json(['message' => 'Unauthorized'], 403);
+        }
+
+        $reps = \App\Models\User::where('company_id', $user->company_id)
+            ->whereHas('role', fn ($q) => $q->salesRep())
+            ->whereRaw('is_active = true')
+            ->select('id', 'first_name', 'last_name', 'email')
+            ->orderBy('first_name')
+            ->get();
+
+        return response()->json(['data' => $reps]);
+    }
+
+    /**
+     * Assign (or clear) the sales rep on an existing invoice.
+     */
+    public function assignRep(Request $request, string $id): JsonResponse
+    {
+        $user = $request->user();
+        if (!$this->hasPermission($request, 'can_update_invoices', $user->company_id)) {
+            return response()->json(['message' => 'Unauthorized'], 403);
+        }
+
+        $validator = Validator::make($request->all(), [
+            'sales_rep_id' => 'nullable|uuid|exists:users,id',
+        ]);
+
+        if ($validator->fails()) {
+            return response()->json(['errors' => $validator->errors()], 422);
+        }
+
+        $invoice = Invoice::where('company_id', $user->company_id)->findOrFail($id);
+        $invoice->update(['sales_rep_id' => $request->sales_rep_id]);
+
+        return response()->json([
+            'message' => $request->sales_rep_id ? 'Sales rep assigned' : 'Sales rep cleared',
+            'data' => $invoice->fresh(['salesRep:id,first_name,last_name,email']),
+        ]);
+    }
+
+    /**
      * Display a listing of invoices.
      */
     public function index(Request $request): JsonResponse
@@ -96,15 +178,34 @@ class InvoiceController extends Controller
                 if (!$this->hasPermission($request, 'can_view_invoices', $companyId)) {
                     return response()->json(['message' => 'Unauthorized'], 403);
                 }
-                $query = Invoice::with(['customer', 'order', 'createdBy'])
+                $query = Invoice::with(['customer', 'order', 'createdBy', 'salesRep:id,first_name,last_name,email'])
+                    ->withCount('lineItems')
                     ->where('company_id', $companyId);
                 // ...existing code...
                 // Filter by customer
                 if ($request->has('customer_id')) {
                     $query->where('customer_id', $request->customer_id);
                 }
+                // Filter by sales rep
+                if ($request->has('sales_rep_id')) {
+                    $query->where('sales_rep_id', $request->sales_rep_id);
+                }
+                // Filter by payment type (cash vs credit)
+                if ($request->has('payment_type')) {
+                    $query->where('payment_type', $request->payment_type);
+                }
+                if ($request->filled('search')) {
+                    $term = $request->input('search');
+                    $query->where(function ($q) use ($term) {
+                        $q->where('invoice_number', 'ilike', "%{$term}%")
+                            ->orWhereHas('customer', function ($cq) use ($term) {
+                                $cq->where('name', 'ilike', "%{$term}%")
+                                    ->orWhere('business_name', 'ilike', "%{$term}%");
+                            });
+                    });
+                }
                 // ...existing code...
-                $invoices = $query->paginate($request->get('per_page', 15));
+                $invoices = $query->orderBy('created_at', 'desc')->paginate($request->get('per_page', 15));
                 return response()->json($invoices);
             });
         } catch (\Exception $e) {
@@ -125,9 +226,18 @@ class InvoiceController extends Controller
 
         $validator = Validator::make($request->all(), [
             'customer_id' => 'required|exists:customers,id',
+            'sales_rep_id' => 'nullable|uuid|exists:users,id',
+            'payment_option' => 'sometimes|in:instant,credit',
+            'payment_method' => 'required_if:payment_option,instant|nullable|string',
+            'transaction_id' => 'nullable|string',
+            // Optional down payment on an otherwise-credit invoice, e.g. to cover the
+            // portion that would exceed the customer's available credit.
+            'down_payment_amount' => 'nullable|numeric|min:0.01',
+            'down_payment_method' => 'required_with:down_payment_amount|nullable|string',
+            'down_payment_transaction_id' => 'nullable|string',
             'type' => 'sometimes|in:sales,service,recurring',
             'invoice_date' => 'required|date',
-            'due_date' => 'required|date|after_or_equal:invoice_date',
+            'due_date' => 'sometimes|date|after_or_equal:invoice_date',
             'currency' => 'sometimes|string|size:3',
             'payment_terms' => 'nullable|string',
             'notes' => 'nullable|string',
@@ -153,15 +263,39 @@ class InvoiceController extends Controller
             DB::beginTransaction();
 
             $user = $request->user();
+            $customer = Customer::findOrFail($request->customer_id);
+            $paymentOption = $request->input('payment_option'); // 'instant' | 'credit' | null (legacy auto)
+
+            if ($paymentOption === 'instant') {
+                // Paid on the spot - due immediately, no credit terms involved.
+                $credit = [
+                    'payment_type' => 'cash',
+                    'credit_terms_days' => null,
+                    'due_date' => $request->invoice_date,
+                    'payment_terms' => $request->payment_terms ?? 'Paid Instantly',
+                ];
+            } else {
+                // 'credit' or legacy/unspecified: use the customer's GM-approved credit terms
+                $credit = $this->resolveInvoiceCredit(
+                    $customer,
+                    $request->invoice_date,
+                    $request->due_date,
+                    $request->payment_terms,
+                );
+            }
+
             $invoice = Invoice::create([
                 'company_id' => $user->company_id,
                 'customer_id' => $request->customer_id,
+                'sales_rep_id' => $request->sales_rep_id,
+                'payment_type' => $credit['payment_type'],
+                'credit_terms_days' => $credit['credit_terms_days'],
                 'type' => $request->type ?? 'sales',
                 'status' => 'draft',
                 'invoice_date' => $request->invoice_date,
-                'due_date' => $request->due_date,
+                'due_date' => $credit['due_date'],
                 'currency' => $request->currency ?? 'KES',
-                'payment_terms' => $request->payment_terms,
+                'payment_terms' => $credit['payment_terms'],
                 'notes' => $request->notes,
                 'terms_and_conditions' => $request->terms_and_conditions,
                 'etims_requested' => $request->boolean('generate_etims_receipt', true),
@@ -201,11 +335,40 @@ class InvoiceController extends Controller
             // Calculate totals
             $invoice->calculateTotals();
 
+            // Instant payment: record it now so the invoice is created already paid,
+            // instead of leaving a manual "Record Payment" step for a cash/mpesa/bank sale.
+            if ($paymentOption === 'instant') {
+                $this->paymentApplication->applyPayment(
+                    $invoice,
+                    $user,
+                    (float) $invoice->total_amount,
+                    $request->payment_method,
+                    $request->transaction_id,
+                    null,
+                    $request->invoice_date,
+                );
+                $invoice->refresh();
+            } elseif ($request->filled('down_payment_amount')) {
+                // Credit invoice with a down payment, e.g. to cover the slice that
+                // exceeds the customer's available credit. applyPayment() itself
+                // rejects an amount larger than the invoice total.
+                $this->paymentApplication->applyPayment(
+                    $invoice,
+                    $user,
+                    (float) $request->down_payment_amount,
+                    $request->down_payment_method,
+                    $request->down_payment_transaction_id,
+                    null,
+                    $request->invoice_date,
+                );
+                $invoice->refresh();
+            }
+
             DB::commit();
 
             return response()->json([
                 'message' => 'Invoice created successfully',
-                'data' => $invoice->load(['customer', 'lineItems'])
+                'data' => $invoice->load(['customer', 'lineItems', 'salesRep:id,first_name,last_name,email'])
             ], 201);
 
         } catch (\Exception $e) {
@@ -263,6 +426,8 @@ class InvoiceController extends Controller
             'notes' => 'nullable|string',
             'terms_and_conditions' => 'nullable|string',
             'generate_etims_receipt' => 'sometimes|boolean',
+            'payment_type' => 'sometimes|in:cash,credit',
+            'credit_terms_days' => 'nullable|integer|min:0',
             'status' => 'sometimes|in:draft,sent,viewed,paid,overdue,cancelled',
             'line_items' => 'sometimes|array|min:1',
             'line_items.*.id' => 'sometimes|exists:invoice_line_items,id',
@@ -293,7 +458,9 @@ class InvoiceController extends Controller
                 'payment_terms',
                 'notes',
                 'terms_and_conditions',
-                'status'
+                'status',
+                'payment_type',
+                'credit_terms_days',
             ]));
 
             if ($request->has('generate_etims_receipt')) {
@@ -398,6 +565,13 @@ class InvoiceController extends Controller
             'due_date' => 'sometimes|date',
             'payment_terms' => 'nullable|string',
             'notes' => 'nullable|string',
+            'sales_rep_id' => 'nullable|uuid|exists:users,id',
+            'payment_option' => 'sometimes|in:instant,credit',
+            'payment_method' => 'required_if:payment_option,instant|nullable|string',
+            'transaction_id' => 'nullable|string',
+            'down_payment_amount' => 'nullable|numeric|min:0.01',
+            'down_payment_method' => 'required_with:down_payment_amount|nullable|string',
+            'down_payment_transaction_id' => 'nullable|string',
         ]);
 
         if ($validator->fails()) {
@@ -421,18 +595,39 @@ class InvoiceController extends Controller
             // Calculate invoice status based on payment amount
             $amountPaid = $order->amount_paid ?? 0;
             $totalAmount = $order->final_amount;
-            $invoiceStatus = $this->calculateInvoiceStatus($amountPaid, $totalAmount, $request->due_date ?? now()->addDays(30)->toDateString());
+            $invoiceDate = $request->invoice_date ?? now()->toDateString();
+            $paymentOption = $request->input('payment_option');
+
+            if ($paymentOption === 'instant') {
+                $credit = [
+                    'payment_type' => 'cash',
+                    'credit_terms_days' => null,
+                    'due_date' => $invoiceDate,
+                    'payment_terms' => $request->payment_terms ?? 'Paid Instantly',
+                ];
+            } else {
+                $credit = $this->resolveInvoiceCredit(
+                    $order->customer,
+                    $invoiceDate,
+                    $request->due_date,
+                    $request->payment_terms,
+                );
+            }
+            $invoiceStatus = $this->calculateInvoiceStatus($amountPaid, $totalAmount, $credit['due_date']);
 
             $invoice = Invoice::create([
                 'company_id' => $user->company_id,
                 'customer_id' => $order->customer_id,
+                'sales_rep_id' => $request->sales_rep_id ?? $order->sales_rep_id,
+                'payment_type' => $credit['payment_type'],
+                'credit_terms_days' => $credit['credit_terms_days'],
                 'order_id' => $order->id,
                 'type' => 'sales',
                 'status' => $invoiceStatus,
-                'invoice_date' => $request->invoice_date ?? now()->toDateString(),
-                'due_date' => $request->due_date ?? now()->addDays(30)->toDateString(),
+                'invoice_date' => $invoiceDate,
+                'due_date' => $credit['due_date'],
                 'currency' => $order->currency ?? 'KES',
-                'payment_terms' => $request->payment_terms ?? 'Net 30',
+                'payment_terms' => $credit['payment_terms'],
                 'notes' => $request->notes,
                 'created_by' => $user->id,
                 'subtotal' => 0,
@@ -464,11 +659,42 @@ class InvoiceController extends Controller
             // Calculate totals
             $invoice->calculateTotals();
 
+            // Instant payment: settle whatever balance remains right now.
+            if ($paymentOption === 'instant') {
+                $invoice->refresh();
+                $remaining = (float) $invoice->total_amount - (float) $invoice->getTotalAllocatedAmount();
+                if ($remaining > 0) {
+                    $this->paymentApplication->applyPayment(
+                        $invoice,
+                        $user,
+                        $remaining,
+                        $request->payment_method,
+                        $request->transaction_id,
+                        null,
+                        $invoiceDate,
+                    );
+                    $invoice->refresh();
+                }
+            } elseif ($request->filled('down_payment_amount')) {
+                // Credit invoice with a down payment, e.g. to cover the slice that
+                // exceeds the customer's available credit.
+                $this->paymentApplication->applyPayment(
+                    $invoice,
+                    $user,
+                    (float) $request->down_payment_amount,
+                    $request->down_payment_method,
+                    $request->down_payment_transaction_id,
+                    null,
+                    $invoiceDate,
+                );
+                $invoice->refresh();
+            }
+
             DB::commit();
 
             return response()->json([
                 'message' => 'Invoice created from order successfully',
-                'data' => $invoice->load(['customer', 'order', 'lineItems'])
+                'data' => $invoice->load(['customer', 'order', 'lineItems', 'salesRep:id,first_name,last_name,email'])
             ], 201);
 
         } catch (\Exception $e) {
@@ -656,121 +882,57 @@ class InvoiceController extends Controller
             return response()->json(['errors' => $validator->errors()], 422);
         }
 
+        if (strtolower((string) $request->payment_method) === 'cheque') {
+            return response()->json([
+                'message' => 'Cheque payments must be recorded via POST /cheques so they can be tracked as pending until they mature and are approved.',
+            ], 422);
+        }
+
         try {
             $user = $request->user();
             $invoice = Invoice::where('company_id', $user->company_id)
                 ->findOrFail($id);
 
-            $paymentAmount = $request->amount;
-
-            // Calculate current amount paid from allocations
-            $currentAmountPaid = $invoice->getTotalAllocatedAmount();
-            $newAmountPaid = $currentAmountPaid + $paymentAmount;
-            $newBalance = $invoice->total_amount - $newAmountPaid;
-
-            // Prevent overpayment
-            if ($newAmountPaid > $invoice->total_amount) {
-                return response()->json([
-                    'message' => 'Payment amount exceeds invoice balance',
-                    'invoice_total' => $invoice->total_amount,
-                    'amount_paid' => $currentAmountPaid,
-                    'balance_due' => $invoice->total_amount - $currentAmountPaid,
-                    'attempted_payment' => $paymentAmount
-                ], 400);
-            }
-
-            DB::beginTransaction();
-
-            // Create Payment record (master payment)
-            $payment = Payment::create([
-                'id' => \Illuminate\Support\Str::uuid(),
-                'order_id' => $invoice->order_id,
-                'customer_id' => $invoice->customer_id,
-                'company_id' => $user->company_id,
-                'payment_method' => $request->payment_method ?? 'manual',
-                'transaction_id' => $request->transaction_id ?? 'INV-PAY-' . time(),
-                'amount_paid' => $paymentAmount,
-                'status' => 'completed',
-                'payment_date' => $request->payment_date ?? now(),
-            ]);
-
-            // Create Payment Allocation (links payment to invoice)
-            $allocation = PaymentAllocation::create([
-                'payment_id' => $payment->id,
-                'invoice_id' => $invoice->id,
-                'amount_allocated' => $paymentAmount, // Full amount allocated
-                'allocated_date' => now(),
-                'notes' => $request->notes,
-            ]);
-
-            // Update invoice amounts and status
-            $newStatus = $this->calculateInvoiceStatus($newAmountPaid, $invoice->total_amount, $invoice->due_date);
-
-            $invoice->update([
-                'amount_paid' => $newAmountPaid,
-                'balance_amount' => $newBalance,
-                'status' => $newStatus
-            ]);
-
-            // Create accounting journal entry for the payment based on company settings
-            // The workflow service determines if this is a payment-triggered A/R (cash basis)
-            // or a payment clearing existing A/R (accrual basis)
-            try {
-                $result = $this->accountingWorkflow
-                    ->forCompany($user->company_id)
-                    ->asUser($user->id)
-                    ->onCustomerPaymentReceived(
-                        $invoice,
-                        $paymentAmount,
-                        $payment->payment_method,
-                        $payment->transaction_id
-                    );
-
-                if ($result) {
-                    Log::info('Accounting entry created for payment', [
-                        'payment_id' => $payment->id,
-                        'invoice_id' => $invoice->id,
-                        'accounting_method' => $this->accountingWorkflow->isAccrualBasis() ? 'accrual' : 'cash'
-                    ]);
-                } else {
-                    Log::info('Accounting entry skipped for payment (company settings)', [
-                        'payment_id' => $payment->id,
-                        'invoice_id' => $invoice->id
-                    ]);
-                }
-            } catch (\Exception $accountingError) {
-                // Log but don't fail the payment - accounting can be reconciled later
-                Log::warning('Failed to create accounting entry for payment', [
-                    'payment_id' => $payment->id,
-                    'invoice_id' => $invoice->id,
-                    'error' => $accountingError->getMessage()
-                ]);
-            }
-
-            DB::commit();
+            $result = $this->paymentApplication->applyPayment(
+                $invoice,
+                $user,
+                (float) $request->amount,
+                $request->payment_method ?? 'manual',
+                $request->transaction_id,
+                $request->notes,
+                $request->payment_date,
+            );
 
             return response()->json([
                 'message' => 'Payment recorded successfully',
                 'data' => [
-                    'invoice' => $invoice->fresh(),
+                    'invoice' => $result['invoice'],
                     'payment' => [
-                        'id' => $payment->id,
-                        'amount' => $paymentAmount,
-                        'payment_method' => $payment->payment_method,
-                        'payment_date' => $payment->payment_date->toDateString(),
-                        'transaction_id' => $payment->transaction_id,
+                        'id' => $result['payment']->id,
+                        'amount' => (float) $request->amount,
+                        'payment_method' => $result['payment']->payment_method,
+                        'payment_date' => $result['payment']->payment_date->toDateString(),
+                        'transaction_id' => $result['payment']->transaction_id,
                         'notes' => $request->notes
                     ],
                     'allocation' => [
-                        'id' => $allocation->id,
-                        'amount_allocated' => $allocation->amount_allocated,
-                        'allocated_date' => $allocation->allocated_date
+                        'id' => $result['allocation']->id,
+                        'amount_allocated' => $result['allocation']->amount_allocated,
+                        'allocated_date' => $result['allocation']->allocated_date
                     ]
                 ]
             ]);
 
+        } catch (\RuntimeException $e) {
+            $invoice = Invoice::where('company_id', $user->company_id)->find($id);
+            return response()->json([
+                'message' => $e->getMessage(),
+                'invoice_total' => $invoice->total_amount ?? null,
+                'amount_paid' => $invoice?->getTotalAllocatedAmount(),
+                'balance_due' => $invoice ? $invoice->total_amount - $invoice->getTotalAllocatedAmount() : null,
+                'attempted_payment' => $request->amount,
+            ], 400);
         } catch (\Exception $e) {
-            DB::rollBack();
             Log::error('Failed to record payment', ['error' => $e->getMessage()]);
             return response()->json(['message' => 'Failed to record payment', 'error' => $e->getMessage()], 500);
         }
@@ -1080,28 +1242,31 @@ class InvoiceController extends Controller
                 ->findOrFail($id);
 
             // Get all payment allocations for this invoice
-            $paymentAllocations = PaymentAllocation::where('invoice_id', $id)
+            $payments = PaymentAllocation::where('invoice_id', $id)
                 ->with([
                     'payment' => function ($query) use ($user) {
                         $query->where('company_id', $user->company_id);
                     }
                 ])
+                ->whereHas('payment', function ($query) use ($user) {
+                    $query->where('company_id', $user->company_id);
+                })
                 ->orderBy('allocated_date', 'desc')
                 ->get()
                 ->map(function ($allocation) {
                     return [
-                        'allocation_id' => $allocation->id,
-                        'payment_id' => $allocation->payment->id,
+                        'id' => $allocation->payment->id,
                         'order_id' => $allocation->payment->order_id,
+                        'invoice_id' => $allocation->invoice_id,
                         'customer_id' => $allocation->payment->customer_id,
                         'company_id' => $allocation->payment->company_id,
                         'payment_method' => $allocation->payment->payment_method,
                         'transaction_id' => $allocation->payment->transaction_id,
-                        'payment_total_amount' => $allocation->payment->amount_paid,
-                        'amount_allocated_to_invoice' => $allocation->amount_allocated,
+                        'amount_paid' => $allocation->payment->amount_paid,
+                        'amount_applied' => $allocation->amount_allocated,
                         'status' => $allocation->payment->status,
                         'payment_date' => $allocation->payment->payment_date,
-                        'allocated_date' => $allocation->allocated_date,
+                        'applied_date' => $allocation->allocated_date,
                         'notes' => $allocation->notes,
                         'created_at' => $allocation->created_at,
                         'updated_at' => $allocation->updated_at,
@@ -1109,7 +1274,7 @@ class InvoiceController extends Controller
                 });
 
             // Calculate totals from allocations
-            $totalAllocated = $paymentAllocations->sum('amount_allocated');
+            $totalAllocated = $payments->sum('amount_applied');
 
             return response()->json([
                 'message' => 'Payment history retrieved successfully',
@@ -1119,8 +1284,8 @@ class InvoiceController extends Controller
                     'total_amount' => $invoice->total_amount,
                     'amount_paid' => $totalAllocated,
                     'balance_amount' => $invoice->total_amount - $totalAllocated,
-                    'payment_allocations' => $paymentAllocations,
-                    'allocation_count' => $paymentAllocations->count()
+                    'payment_count' => $payments->count(),
+                    'payments' => $payments,
                 ]
             ]);
 

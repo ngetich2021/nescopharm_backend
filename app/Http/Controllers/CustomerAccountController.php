@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers;
 
+use App\Http\Traits\CreatesCustomerAccounts;
 use App\Models\CustomerAccount;
 use App\Models\AccountDirector;
 use App\Models\AuthorisedPurchasePerson;
@@ -16,6 +17,7 @@ use Illuminate\Support\Facades\DB;
 
 class CustomerAccountController extends Controller
 {
+    use CreatesCustomerAccounts;
 
     public function __construct()
     {
@@ -43,24 +45,6 @@ class CustomerAccountController extends Controller
         // Fallback: check specific permission
         return $role->hasPermission($permission);
     }
-        /**
-         * Generate a unique account number for a customer account.
-         * Format: ACC-{companyId8}-{sequential 4 digits}
-         */
-        protected function generateAccountNumber($companyId)
-        {
-            $prefix = 'ACC-' . substr($companyId, 0, 8) . '-';
-            $lastAccount = DB::table('customer_accounts')
-                ->select('account_number')
-                ->where('account_number', 'like', $prefix . '%')
-                ->orderBy('account_number', 'desc')
-                ->lockForUpdate()
-                ->first();
-
-            $nextNumber = $lastAccount ? (int)substr($lastAccount->account_number, strlen($prefix)) + 1 : 1;
-            return $prefix . str_pad($nextNumber, 4, '0', STR_PAD_LEFT);
-        }
-
     public function index(Request $request)
     {
         $user = $request->user();
@@ -147,6 +131,8 @@ class CustomerAccountController extends Controller
             'annual_turnover' => 'nullable|numeric|min:0',
             'credit_required' => 'nullable|numeric|min:0',
             'credit_period_required' => 'nullable|string|max:100',
+            'credit_period_pd_cheque_days' => 'nullable|integer|min:0|max:365',
+            'credit_days' => 'nullable|integer|min:0|max:3650',
             'currently_defaulted' => 'nullable|boolean',
             'credit_terms' => 'nullable|string|max:255',
             'notes' => 'nullable|string',
@@ -187,73 +173,26 @@ class CustomerAccountController extends Controller
         }
 
         try {
-            $accountNumber = $this->generateAccountNumber($user->company_id);
-            $account = CustomerAccount::create([
-                'id' => (string) Str::uuid(),
-                'customer_id' => $request->input('customer_id'),
-                'company_id' => $user->company_id,
-                'account_number' => $accountNumber,
-                'certificate_of_incorporation_number' => $request->input('certificate_of_incorporation_number'),
-                'annual_turnover' => $request->input('annual_turnover'),
-                'credit_required' => $request->input('credit_required'),
-                'credit_period_required' => $request->input('credit_period_required'),
-                'currently_defaulted' => filter_var($request->input('currently_defaulted', false), FILTER_VALIDATE_BOOLEAN),
-                'credit_terms' => $request->input('credit_terms'),
-                'notes' => $request->input('notes'),
-                'created_by' => $user->id,
-            ]);
-
-            // Automatically link account to customer
-            $customer = \App\Models\Customer::find($request->input('customer_id'));
-            if ($customer) {
-                $customer->account_id = $account->id;
-                $customer->save();
-            }
-
-            // Directors
-            foreach ($request->input('directors', []) as $director) {
-                AccountDirector::create([
-                    'id' => (string) Str::uuid(),
-                    'customer_account_id' => $account->id,
-                    'name' => $director['name'],
-                    'id_passport_number' => $director['id_passport_number'],
-                    'pin' => $director['pin'] ?? null,
-                    'phone_number' => $director['phone_number'] ?? null,
-                ]);
-            }
-
-            // Authorised Purchase Persons
-            foreach ($request->input('authorised_purchase_persons', []) as $person) {
-                AuthorisedPurchasePerson::create([
-                    'id' => (string) Str::uuid(),
-                    'customer_account_id' => $account->id,
-                    'name' => $person['name'],
-                    'phone_number' => $person['phone_number'] ?? null,
-                ]);
-            }
-
-            // Suppliers
-            foreach ($request->input('suppliers', []) as $supplier) {
-                AccountSupplier::create([
-                    'id' => (string) Str::uuid(),
-                    'customer_account_id' => $account->id,
-                    'name' => $supplier['name'],
-                    'contact_person_name' => $supplier['contact_person_name'] ?? null,
-                    'phone_number' => $supplier['phone_number'] ?? null,
-                    'credit_limit' => $supplier['credit_limit'] ?? null,
-                ]);
-            }
-
-            // Bank Details
-            foreach ($request->input('bank_details', []) as $bank) {
-                AccountBankDetail::create([
-                    'id' => (string) Str::uuid(),
-                    'customer_account_id' => $account->id,
-                    'bank_name' => $bank['bank_name'],
-                    'branch' => $bank['branch'] ?? null,
-                    'account_number' => $bank['account_number'] ?? null,
-                ]);
-            }
+            $account = $this->createAccountFromData(
+                $request->input('customer_id'),
+                $user->company_id,
+                $user->id,
+                $request->only([
+                    'certificate_of_incorporation_number',
+                    'annual_turnover',
+                    'credit_required',
+                    'credit_period_required',
+                    'credit_period_pd_cheque_days',
+                    'credit_days',
+                    'currently_defaulted',
+                    'credit_terms',
+                    'notes',
+                    'directors',
+                    'authorised_purchase_persons',
+                    'suppliers',
+                    'bank_details',
+                ])
+            );
 
             // Handle multiple document uploads if provided
             $documents = [];
@@ -320,6 +259,7 @@ class CustomerAccountController extends Controller
             'annual_turnover' => 'nullable|numeric|min:0',
             'credit_required' => 'nullable|numeric|min:0',
             'credit_period_required' => 'nullable|string|max:100',
+            'credit_days' => 'nullable|integer|min:0|max:3650',
             'currently_defaulted' => 'nullable|boolean',
             'credit_terms' => 'nullable|string|max:255',
             'notes' => 'nullable|string',
@@ -344,14 +284,18 @@ class CustomerAccountController extends Controller
         }
 
         try {
+            // NOTE: nature_of_business/pin_number are NOT columns on customer_accounts
+            // (see Model comment) - they used to be force-filled here unconditionally,
+            // which made every update() call throw a DB "unknown column" error. That
+            // data lives on the linked Customer; update it there instead if needed.
             $account->forceFill([
                 'account_number' => $request->input('account_number', $account->account_number),
-                'nature_of_business' => $request->input('nature_of_business', $account->nature_of_business),
                 'certificate_of_incorporation_number' => $request->input('certificate_of_incorporation_number', $account->certificate_of_incorporation_number),
-                'pin_number' => $request->input('pin_number', $account->pin_number),
                 'annual_turnover' => $request->input('annual_turnover', $account->annual_turnover),
                 'credit_required' => $request->input('credit_required', $account->credit_required),
                 'credit_period_required' => $request->input('credit_period_required', $account->credit_period_required),
+                'credit_period_pd_cheque_days' => $request->input('credit_period_pd_cheque_days', $account->credit_period_pd_cheque_days),
+                'credit_days' => $request->input('credit_days', $account->credit_days),
                 'currently_defaulted' => $request->input('currently_defaulted', $account->currently_defaulted),
                 'credit_terms' => $request->input('credit_terms', $account->credit_terms),
                 'notes' => $request->input('notes', $account->notes),
@@ -533,11 +477,19 @@ class CustomerAccountController extends Controller
         }
 
         $validator = Validator::make($request->all(), [
-            'requested_credit_limit' => 'required|numeric|min:0',
+            'requested_credit_limit' => 'nullable|numeric|min:0',
+            'requested_credit_days' => 'nullable|integer|min:0|max:3650',
             'reason' => 'nullable|string|max:500',
             'justification' => 'nullable|string|max:1000',
             'supporting_documents' => 'nullable|array',
         ]);
+
+        if (!$request->filled('requested_credit_limit') && !$request->filled('requested_credit_days')) {
+            return response()->json([
+                'status' => 'failed',
+                'message' => 'Provide a requested credit limit and/or a requested credit period (days).',
+            ], 400);
+        }
 
         if ($validator->fails()) {
             return response()->json([
@@ -548,22 +500,26 @@ class CustomerAccountController extends Controller
 
         try {
             $currentCreditLimit = $account->credit_required ?? 0;
-            $requestedCreditLimit = $request->input('requested_credit_limit');
+            $requestedCreditLimit = $request->filled('requested_credit_limit') ? $request->input('requested_credit_limit') : $currentCreditLimit;
+            $currentCreditDays = $account->credit_days;
+            $requestedCreditDays = $request->filled('requested_credit_days') ? (int) $request->input('requested_credit_days') : $currentCreditDays;
 
             // Check if there's already a pending request
             if ($account->has_pending_credit_change) {
                 return response()->json([
                     'status' => 'failed',
-                    'message' => 'There is already a pending credit limit change for this account. Please wait for approval or cancellation.',
+                    'message' => 'There is already a pending credit terms change for this account. Please wait for approval or cancellation.',
                     'data' => [
                         'current_pending_request' => $account->pending_credit_info
                     ]
                 ], 400);
             }
 
-            // Update the account with pending credit limit
+            // Update the account with the pending terms - only credit_days actually used
+            // for invoicing (via resolveInvoiceCredit) once a GM approves this request.
             $account->update([
-                'pending_credit_limit' => $requestedCreditLimit
+                'pending_credit_limit' => $requestedCreditLimit,
+                'pending_credit_days' => $requestedCreditDays,
             ]);
 
             // Create a pending approval record
@@ -573,12 +529,14 @@ class CustomerAccountController extends Controller
                 'approved_by' => null, // Will be set when approved
                 'approved_at' => null, // Will be set when approved
                 'status' => 'pending',
-                'notes' => $request->input('reason', 'Credit limit update requested'),
+                'notes' => $request->input('reason', 'Credit terms update requested'),
                 'company_id' => $user->company_id,
                 'created_by' => $user->id,
                 'approval_type' => 'credit_limit_update',
                 'previous_credit_limit' => $currentCreditLimit,
                 'new_credit_limit' => $requestedCreditLimit,
+                'previous_credit_days' => $currentCreditDays,
+                'new_credit_days' => $requestedCreditDays,
                 'metadata' => [
                     'justification' => $request->input('justification'),
                     'supporting_documents' => $request->input('supporting_documents', []),
@@ -589,24 +547,28 @@ class CustomerAccountController extends Controller
 
             $approval = \App\Models\CustomerAccountApproval::create($approvalData);
 
-            Log::info('Credit limit update requested', [
+            Log::info('Credit terms update requested', [
                 'customer_account_id' => $id,
                 'requested_by' => $user->id,
                 'current_limit' => $currentCreditLimit,
                 'requested_limit' => $requestedCreditLimit,
+                'current_days' => $currentCreditDays,
+                'requested_days' => $requestedCreditDays,
                 'approval_id' => $approval->id
             ]);
 
             return response()->json([
                 'status' => 'success',
-                'message' => 'Credit limit update request submitted successfully. Awaiting approval.',
+                'message' => 'Credit terms update request submitted successfully. Awaiting GM approval.',
                 'data' => [
                     'approval_request' => $approval,
                     'account_info' => [
                         'current_credit_limit' => $currentCreditLimit,
                         'requested_credit_limit' => $requestedCreditLimit,
                         'change_amount' => $requestedCreditLimit - $currentCreditLimit,
-                        'change_type' => $requestedCreditLimit > $currentCreditLimit ? 'increase' : 'decrease'
+                        'change_type' => $requestedCreditLimit > $currentCreditLimit ? 'increase' : 'decrease',
+                        'current_credit_days' => $currentCreditDays,
+                        'requested_credit_days' => $requestedCreditDays,
                     ]
                 ]
             ], 201);

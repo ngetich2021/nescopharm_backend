@@ -52,6 +52,8 @@ class RoleController extends Controller
             'permission_ids' => 'array',
             'permission_ids.*' => 'uuid|exists:permissions,id',
             'is_active' => 'boolean',
+            'is_sales_rep' => 'boolean',
+            'is_warehouse_incharge' => 'boolean',
             // 'company_id' is not accepted from the request
         ]);
 
@@ -69,6 +71,8 @@ class RoleController extends Controller
                 'name' => $request->input('name'),
                 'description' => $request->input('description'),
                 'is_active' => filter_var($request->input('is_active', true), FILTER_VALIDATE_BOOLEAN),
+                'is_sales_rep' => filter_var($request->input('is_sales_rep', false), FILTER_VALIDATE_BOOLEAN),
+                'is_warehouse_incharge' => filter_var($request->input('is_warehouse_incharge', false), FILTER_VALIDATE_BOOLEAN),
                 'company_id' => $user->company_id,
                 'created_at' => now(),
                 'updated_at' => now(),
@@ -352,6 +356,8 @@ class RoleController extends Controller
             'permission_ids' => 'sometimes|array',
             'permission_ids.*' => 'uuid|exists:permissions,id',
             'is_active' => 'sometimes|boolean',
+            'is_sales_rep' => 'sometimes|boolean',
+            'is_warehouse_incharge' => 'sometimes|boolean',
         ]);
 
         if ($validator->fails()) {
@@ -391,6 +397,12 @@ class RoleController extends Controller
             // Handle boolean values properly
             if (isset($updateData['is_active'])) {
                 $updateData['is_active'] = filter_var($updateData['is_active'], FILTER_VALIDATE_BOOLEAN);
+            }
+            if (isset($updateData['is_sales_rep'])) {
+                $updateData['is_sales_rep'] = filter_var($updateData['is_sales_rep'], FILTER_VALIDATE_BOOLEAN);
+            }
+            if (isset($updateData['is_warehouse_incharge'])) {
+                $updateData['is_warehouse_incharge'] = filter_var($updateData['is_warehouse_incharge'], FILTER_VALIDATE_BOOLEAN);
             }
             // Remove permission_ids from updateData
             $permissionIds = $updateData['permission_ids'] ?? null;

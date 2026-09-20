@@ -63,7 +63,7 @@ class BudgetController extends Controller
             $query->where('budget_type', $request->budget_type);
         }
         if ($request->has('search')) {
-            $query->where('name', 'like', '%' . $request->search . '%');
+            $query->where('name', 'ilike', '%' . $request->search . '%');
         }
         $budgets = $query->orderBy('created_at', 'desc')
             ->paginate($request->get('per_page', 15));

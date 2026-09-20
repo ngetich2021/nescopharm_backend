@@ -66,7 +66,7 @@ class StockCountController extends Controller
         } else {
             $nextNumber = 1;
         }
-        
+
         return $prefix . str_pad($nextNumber, 4, '0', STR_PAD_LEFT);
     }
 
@@ -182,6 +182,7 @@ class StockCountController extends Controller
                             'id',
                             'stock_count_id',
                             'product_id',
+                            'variant_id',
                             'product_name',
                             'product_sku',
                             'product_category',
@@ -197,9 +198,14 @@ class StockCountController extends Controller
                             'counted_at',
                             'notes'
                         )
-                            ->with(['product' => function ($query) {
-                                $query->select('id', 'name', 'unit_cost');
-                            }]);
+                            ->with([
+                                'product' => function ($query) {
+                                    $query->select('id', 'name', 'unit_cost');
+                                },
+                                'variant' => function ($query) {
+                                    $query->select('id', 'product_id', 'name', 'sku', 'stock_quantity');
+                                },
+                            ]);
                     }
                 ]);
 
@@ -262,7 +268,13 @@ class StockCountController extends Controller
             'scheduled_date' => 'nullable|date',
             'assigned_to' => 'nullable|string|max:255',
             'items' => 'required_if:status,in_progress|array|min:1',
-            'items.*.product_id' => 'required|uuid|exists:products,id',
+            // Deliberately NOT 'exists:products,id' / 'exists:product_variants,id' here:
+            // Laravel's wildcard exists rule runs one query PER item (not batched), so a
+            // full-catalog count (300+ items) fired 600+ extra queries here alone and
+            // blew the request past the timeout. The loop right below already does the
+            // same existence/ownership check properly, batched via whereIn.
+            'items.*.product_id' => 'required|uuid',
+            'items.*.variant_id' => 'nullable|uuid',
             'items.*.expected_quantity' => 'required|integer|min:0',
             'items.*.counted_quantity' => 'nullable|integer|min:0',
             'items.*.notes' => 'nullable|string',
@@ -308,25 +320,69 @@ class StockCountController extends Controller
                 ], 400);
             }
 
-            // Validate items
+            // Validate items. Batch-load every referenced product/variant in two
+            // queries instead of one Product::find()/ProductVariant::find() per item -
+            // with a full-catalog "All Products" count this can be 300+ items, and
+            // one round trip per item to a remote DB blew past the request timeout.
             $items = $request->input('items', []);
+            $productIds = array_values(array_unique(array_column($items, 'product_id')));
+            $variantIds = array_values(array_unique(array_filter(array_column($items, 'variant_id'))));
+            $productsById = Product::whereIn('id', $productIds)->get()->keyBy('id');
+            $variantsById = $variantIds ? ProductVariant::whereIn('id', $variantIds)->get()->keyBy('id') : collect();
+
             foreach ($items as $index => $item) {
-                $product = Product::find($item['product_id']);
+                $product = $productsById->get($item['product_id']);
+                if (!$product) {
+                    return response()->json([
+                        'status' => 'failed',
+                        'message' => "Item at index {$index}: Product not found.",
+                    ], 400);
+                }
                 if ($product->company_id !== $request->input('company_id')) {
                     return response()->json([
                         'status' => 'failed',
                         'message' => "Item at index {$index}: Product does not belong to the company.",
                     ], 403);
                 }
-                if ($product->store_id !== $request->input('store_id')) {
-                    return response()->json([
-                        'status' => 'failed',
-                        'message' => "Item at index {$index}: Product does not belong to the store.",
-                    ], 400);
+
+                $variantId = $item['variant_id'] ?? null;
+                if ($variantId) {
+                    $variant = $variantsById->get($variantId);
+                    if (!$variant || $variant->product_id !== $product->id) {
+                        return response()->json([
+                            'status' => 'failed',
+                            'message' => "Item at index {$index}: Variant does not belong to the specified product.",
+                        ], 400);
+                    }
+                    // A variant with no company_id set is unassigned/inherits the product's company;
+                    // only reject when it is explicitly set and mismatched.
+                    if ($variant->company_id && $variant->company_id !== $request->input('company_id')) {
+                        return response()->json([
+                            'status' => 'failed',
+                            'message' => "Item at index {$index}: Variant does not belong to the company.",
+                        ], 403);
+                    }
+                    // Same null-tolerant rule as products: a NULL store_id on the variant means
+                    // "unassigned — available to any store", so only reject an explicit mismatch.
+                    if ($variant->store_id && $variant->store_id !== $request->input('store_id')) {
+                        return response()->json([
+                            'status' => 'failed',
+                            'message' => "Item at index {$index}: Variant does not belong to the store.",
+                        ], 400);
+                    }
+                } else {
+                    // A NULL store_id on the product means "unassigned — available to any store",
+                    // so only reject when store_id is explicitly set on the product AND mismatched.
+                    if ($product->store_id && $product->store_id !== $request->input('store_id')) {
+                        return response()->json([
+                            'status' => 'failed',
+                            'message' => "Item at index {$index}: Product does not belong to the store.",
+                        ], 400);
+                    }
                 }
             }
 
-            return DB::transaction(function () use ($request, $user, $items) {
+            return DB::transaction(function () use ($request, $user, $items, $productsById, $variantsById) {
                 $countNumber = $this->generateCountNumber($request->input('company_id'), $request->input('store_id'));
 
                 // Date logic fix for DB constraint
@@ -362,26 +418,47 @@ class StockCountController extends Controller
                     'total_products_expected' => count($items),
                 ]);
 
+                // Build every item row in memory and insert them in one query instead
+                // of one StockCountItem::create() (one INSERT round trip) per item.
+                $now = now();
+                $rows = [];
                 foreach ($items as $item) {
-                    $product = Product::find($item['product_id']);
-                    StockCountItem::create([
+                    $product = $productsById->get($item['product_id']);
+                    $variantId = $item['variant_id'] ?? null;
+                    $variant = $variantId ? $variantsById->get($variantId) : null;
+
+                    $productName = $variant ? "{$product->name} - {$variant->name}" : $product->name;
+                    $productSku = $variant ? ($variant->sku ?? $product->sku ?? null) : ($product->sku ?? null);
+                    $unitCost = $variant ? ($variant->cost ?? $product->unit_cost) : $product->unit_cost;
+
+                    $rows[] = [
                         'id' => (string) Str::uuid(),
                         'company_id' => $stockCount->company_id,
                         'store_id' => $stockCount->store_id,
                         'stock_count_id' => $stockCount->id,
                         'product_id' => $item['product_id'],
-                        'product_name' => $product->name,
-                        'product_sku' => $product->sku ?? null,
+                        'variant_id' => $variantId,
+                        'product_name' => $productName,
+                        'product_sku' => $productSku,
                         'product_category' => $product->category ?? null,
-                        'unit_cost' => $product->unit_cost,
+                        'unit_cost' => $unitCost,
                         'expected_quantity' => $item['expected_quantity'],
                         'counted_quantity' => $item['counted_quantity'],
                         'counted_by' => $item['counted_quantity'] ? $user->email : null,
-                        'counted_at' => $item['counted_quantity'] ? now() : null,
+                        'counted_at' => $item['counted_quantity'] ? $now : null,
                         'notes' => $item['notes'],
-                        'is_counted' => !is_null($item['counted_quantity']) ? true : false,
-                        'requires_recount' => ($item['requires_recount'] ?? false) ? true : false,
-                    ]);
+                        // Raw bulk insert() bypasses StockCountItem's boolean mutators, which
+                        // normally convert to the 'true'/'false' strings this Postgres boolean
+                        // column actually needs (see setIsCountedAttribute) - do it here instead.
+                        'is_counted' => !is_null($item['counted_quantity']) ? 'true' : 'false',
+                        'requires_recount' => ($item['requires_recount'] ?? false) ? 'true' : 'false',
+                        'created_at' => $now,
+                        'updated_at' => $now,
+                    ];
+                }
+                // Chunk to stay well under Postgres' bound-parameter limit on very large counts.
+                foreach (array_chunk($rows, 200) as $chunk) {
+                    StockCountItem::insert($chunk);
                 }
 
                 // Calculate metrics after creating all items
@@ -394,7 +471,7 @@ class StockCountController extends Controller
                 return response()->json([
                     'status' => 'success',
                     'message' => 'Stock count created successfully.',
-                    'stock_count' => $stockCount->load(['store', 'items.product', 'creator', 'assignedUser']),
+                    'stock_count' => $stockCount->load(['store', 'items.product', 'items.variant', 'creator', 'assignedUser']),
                 ], 201);
             });
         } catch (\Exception $e) {
@@ -452,8 +529,13 @@ class StockCountController extends Controller
             'assigned_to' => 'nullable|string|max:255',
             'approved_by' => 'nullable|string|max:255',
             'items' => 'sometimes|array',
-            'items.*.id' => 'sometimes|uuid|exists:stock_count_items,id',
-            'items.*.product_id' => 'required|uuid|exists:products,id',
+            // Deliberately NOT 'exists:...' here - see the comment on the same rules
+            // in store(): Laravel's wildcard exists rule runs one query PER item, which
+            // blew a full-catalog update past the timeout. The loop below already does
+            // the same checks properly, batched via whereIn.
+            'items.*.id' => 'sometimes|uuid',
+            'items.*.product_id' => 'required|uuid',
+            'items.*.variant_id' => 'nullable|uuid',
             'items.*.expected_quantity' => 'required|integer|min:0',
             'items.*.counted_quantity' => 'nullable|integer|min:0',
             'items.*.notes' => 'nullable|string',
@@ -512,45 +594,107 @@ class StockCountController extends Controller
 
                 if ($request->has('items')) {
                     $items = $request->input('items');
+
+                    // Batch-load every referenced product/variant/existing-item in a
+                    // handful of queries instead of several per item - with a
+                    // full-catalog count this is 300+ items, and one-by-one lookups
+                    // to a remote DB blew past the request timeout.
+                    $productIds = array_values(array_unique(array_column($items, 'product_id')));
+                    $variantIds = array_values(array_unique(array_filter(array_column($items, 'variant_id'))));
+                    $existingIds = array_values(array_filter(array_column($items, 'id')));
+                    $productsById = Product::whereIn('id', $productIds)->get()->keyBy('id');
+                    $variantsById = $variantIds ? ProductVariant::whereIn('id', $variantIds)->get()->keyBy('id') : collect();
+                    $existingItemsById = $existingIds
+                        ? StockCountItem::whereIn('id', $existingIds)->where('stock_count_id', $stockCount->id)->get()->keyBy('id')
+                        : collect();
+
                     $existingItemIds = [];
+                    $now = now();
+                    $newRows = [];
                     foreach ($items as $item) {
-                        $product = Product::find($item['product_id']);
-                        if ($product->company_id !== $stockCount->company_id || $product->store_id !== $stockCount->store_id) {
+                        $product = $productsById->get($item['product_id']);
+                        if (!$product || $product->company_id !== $stockCount->company_id) {
                             return response()->json([
                                 'status' => 'failed',
-                                'message' => "Item product_id {$item['product_id']}: Invalid company or store.",
+                                'message' => "Item product_id {$item['product_id']}: Invalid company.",
                             ], 400);
                         }
+
+                        $variantId = $item['variant_id'] ?? null;
+                        $variant = $variantId ? $variantsById->get($variantId) : null;
+
+                        if ($variantId) {
+                            if (!$variant || $variant->product_id !== $product->id) {
+                                return response()->json([
+                                    'status' => 'failed',
+                                    'message' => "Item product_id {$item['product_id']}: Variant does not belong to the specified product.",
+                                ], 400);
+                            }
+                            // NULL company_id/store_id on the variant means "unassigned"; only
+                            // reject when explicitly set and mismatched.
+                            if (($variant->company_id && $variant->company_id !== $stockCount->company_id)
+                                || ($variant->store_id && $variant->store_id !== $stockCount->store_id)) {
+                                return response()->json([
+                                    'status' => 'failed',
+                                    'message' => "Item product_id {$item['product_id']}: Invalid variant company or store.",
+                                ], 400);
+                            }
+                        } else {
+                            // NULL store_id on the product means "unassigned — available to any
+                            // store"; only reject when explicitly set and mismatched.
+                            if ($product->store_id && $product->store_id !== $stockCount->store_id) {
+                                return response()->json([
+                                    'status' => 'failed',
+                                    'message' => "Item product_id {$item['product_id']}: Invalid company or store.",
+                                ], 400);
+                            }
+                        }
+
+                        $productName = $variant ? "{$product->name} - {$variant->name}" : $product->name;
+                        $productSku = $variant ? ($variant->sku ?? $product->sku ?? null) : ($product->sku ?? null);
+                        $unitCost = $variant ? ($variant->cost ?? $product->unit_cost) : $product->unit_cost;
 
                         $itemData = [
                             'company_id' => $stockCount->company_id,
                             'store_id' => $stockCount->store_id,
                             'stock_count_id' => $stockCount->id,
                             'product_id' => $item['product_id'],
-                            'product_name' => $product->name,
-                            'product_sku' => $product->sku ?? null,
+                            'variant_id' => $variantId,
+                            'product_name' => $productName,
+                            'product_sku' => $productSku,
                             'product_category' => $product->category ?? null,
-                            'unit_cost' => $product->unit_cost,
+                            'unit_cost' => $unitCost,
                             'expected_quantity' => $item['expected_quantity'],
                             'counted_quantity' => $item['counted_quantity'],
                             'counted_by' => $item['counted_quantity'] ? $user->email : null,
                             'counted_at' => $item['counted_quantity'] ? now() : null,
                             'notes' => $item['notes'],
-                            'is_counted' => !is_null($item['counted_quantity']) ? true : false,
-                            'requires_recount' => ($item['requires_recount'] ?? false) ? true : false,
+                            // String 'true'/'false' (not raw PHP bool) so this works whether it
+                            // goes through Eloquent's update() (mutator accepts either form) or
+                            // the raw bulk insert() below (which bypasses mutators entirely and
+                            // needs the exact form this Postgres boolean column accepts).
+                            'is_counted' => !is_null($item['counted_quantity']) ? 'true' : 'false',
+                            'requires_recount' => ($item['requires_recount'] ?? false) ? 'true' : 'false',
                         ];
 
-                        if (isset($item['id'])) {
-                            $stockCountItem = StockCountItem::where('id', $item['id'])
-                                ->where('stock_count_id', $stockCount->id)
-                                ->first();
-                            if ($stockCountItem) {
-                                $stockCountItem->update($itemData);
-                                $existingItemIds[] = $item['id'];
-                            }
+                        if (isset($item['id']) && $existingItemsById->has($item['id'])) {
+                            $existingItemsById->get($item['id'])->update($itemData);
+                            $existingItemIds[] = $item['id'];
                         } else {
-                            $newItem = StockCountItem::create(array_merge(['id' => (string) Str::uuid()], $itemData));
-                            $existingItemIds[] = $newItem->id;
+                            $newId = (string) Str::uuid();
+                            $newRows[] = array_merge($itemData, [
+                                'id' => $newId,
+                                'counted_at' => $item['counted_quantity'] ? $now : null,
+                                'created_at' => $now,
+                                'updated_at' => $now,
+                            ]);
+                            $existingItemIds[] = $newId;
+                        }
+                    }
+
+                    if (!empty($newRows)) {
+                        foreach (array_chunk($newRows, 200) as $chunk) {
+                            StockCountItem::insert($chunk);
                         }
                     }
 
@@ -563,7 +707,17 @@ class StockCountController extends Controller
                 // Update stock if approved
                 if ($stockCount->status === 'approved' && $stockCount->wasChanged('status')) {
                     foreach ($stockCount->items as $item) {
-                        if ($item->is_variance && $item->product->track_inventory) {
+                        if (!$item->is_variance) {
+                            continue;
+                        }
+                        if ($item->variant_id) {
+                            // Variant-level line: update the variant's own stock, not the parent product's.
+                            $variant = ProductVariant::find($item->variant_id);
+                            if ($variant) {
+                                $variant->stock_quantity = $item->counted_quantity;
+                                $variant->save();
+                            }
+                        } elseif ($item->product && $item->product->track_inventory) {
                             $product = Product::find($item->product_id);
                             $product->stock_quantity = $item->counted_quantity;
                             $product->save();
@@ -582,7 +736,7 @@ class StockCountController extends Controller
                 return response()->json([
                     'status' => 'success',
                     'message' => 'Stock count updated successfully.',
-                    'stock_count' => $stockCount->load(['store', 'items.product', 'creator', 'assignedUser', 'approver']),
+                    'stock_count' => $stockCount->load(['store', 'items.product', 'items.variant', 'creator', 'assignedUser', 'approver']),
                 ], 200);
             });
         } catch (\Exception $e) {

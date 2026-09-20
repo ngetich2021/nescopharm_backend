@@ -5,6 +5,8 @@ namespace App\Http\Controllers;
 use App\Models\Product;
 use App\Models\ProductVariant;
 use App\Models\ProductPackagingUnit;
+use App\Models\ProductCategory;
+use App\Models\ProductPriceTier;
 use App\Models\InventorySerial;
 use App\Models\ProductReceiptItem;
 use Illuminate\Http\Request;
@@ -80,6 +82,102 @@ class ProductController extends Controller
         return $prefix . str_pad($nextNumber, 4, '0', STR_PAD_LEFT);
     }
 
+    /**
+     * Resolve a category_id from a free-text category name, creating the ProductCategory
+     * if it doesn't already exist for this company. Returns null if no name is given.
+     */
+    protected function resolveCategoryId(?string $companyId, ?string $categoryName): ?string
+    {
+        $categoryName = $categoryName ? trim($categoryName) : null;
+        if (!$categoryName || !$companyId) {
+            return null;
+        }
+
+        $category = ProductCategory::where('company_id', $companyId)
+            ->whereRaw('LOWER(name) = ?', [strtolower($categoryName)])
+            ->first();
+
+        if (!$category) {
+            $category = ProductCategory::create([
+                'id' => (string) Str::uuid(),
+                'company_id' => $companyId,
+                'name' => $categoryName,
+                'is_active' => true,
+            ]);
+        }
+
+        return $category->id;
+    }
+
+    /**
+     * Compute the minimum valid price (landed cost + margin) from raw input values,
+     * so it can be checked before a Product model instance necessarily reflects them.
+     */
+    protected function computeMinimumValidPrice(?float $unitCost, ?float $shippingCost, ?float $logisticsCost, ?float $marginAmount): float
+    {
+        return round(($unitCost ?? 0) + ($shippingCost ?? 0) + ($logisticsCost ?? 0) + ($marginAmount ?? 0), 2);
+    }
+
+    /**
+     * Validate that a set of prices (selling price, last price, variant prices, tier prices)
+     * all exceed the minimum valid price. Returns an array of error strings (empty if all pass).
+     */
+    protected function validatePricesAgainstMinimum(float $minPrice, array $pricesToCheck): array
+    {
+        $errors = [];
+        foreach ($pricesToCheck as $label => $price) {
+            if ($price === null) {
+                continue;
+            }
+            if ((float) $price <= $minPrice) {
+                $errors[] = "{$label} (" . number_format((float) $price, 2) . ") must be greater than the minimum valid price of " . number_format($minPrice, 2) . " (cost + shipping + logistics + margin).";
+            }
+        }
+        return $errors;
+    }
+
+    /**
+     * Create/update/delete a product's price tiers to match the given list.
+     * Each tier: ['id' => optional existing id, 'tier_name' => string, 'price' => number]
+     */
+    protected function syncPriceTiers(Product $product, ?array $tiers): void
+    {
+        if ($tiers === null) {
+            return;
+        }
+
+        $keepIds = [];
+        foreach ($tiers as $tier) {
+            if (empty($tier['tier_name']) || !isset($tier['price'])) {
+                continue;
+            }
+            $id = $tier['id'] ?? null;
+            $existing = $id ? ProductPriceTier::where('product_id', $product->id)->find($id) : null;
+
+            if ($existing) {
+                $existing->update([
+                    'tier_name' => $tier['tier_name'],
+                    'price' => $tier['price'],
+                ]);
+                $keepIds[] = $existing->id;
+            } else {
+                $created = ProductPriceTier::create([
+                    'id' => (string) Str::uuid(),
+                    'company_id' => $product->company_id,
+                    'product_id' => $product->id,
+                    'tier_name' => $tier['tier_name'],
+                    'price' => $tier['price'],
+                ]);
+                $keepIds[] = $created->id;
+            }
+        }
+
+        // Remove tiers that were dropped from the submitted list
+        ProductPriceTier::where('product_id', $product->id)
+            ->whereNotIn('id', $keepIds)
+            ->delete();
+    }
+
     public function index(Request $request)
     {
         $user = $request->user();
@@ -90,7 +188,7 @@ class ProductController extends Controller
             ], 403);
         }
 
-        $query = Product::with(['store', 'company', 'category', 'variants', 'supplier']);
+        $query = Product::with(['store', 'company', 'category', 'variants', 'supplier', 'priceTiers']);
         $companyId = $user->company_id;
 
         // If user is system admin and explicitly requests another company
@@ -101,11 +199,28 @@ class ProductController extends Controller
         $query->where('company_id', $companyId);
 
         if ($request->filled('name')) {
-            $query->where('name', 'like', '%' . $request->input('name') . '%');
+            $query->where('name', 'ilike', '%' . $request->input('name') . '%');
+        }
+
+        if ($request->filled('search')) {
+            $term = $request->input('search');
+            $query->where(function ($q) use ($term) {
+                $q->where('name', 'ilike', '%' . $term . '%')
+                    ->orWhere('sku', 'ilike', '%' . $term . '%')
+                    ->orWhere('description', 'ilike', '%' . $term . '%');
+            });
         }
 
         if ($request->filled('category_id')) {
             $query->where('category_id', $request->input('category_id'));
+        }
+
+        if ($request->filled('category') && $request->input('category') !== 'all') {
+            $query->where('category_id', $request->input('category'));
+        }
+
+        if ($request->filled('status') && $request->input('status') !== 'all') {
+            $query->whereRaw('is_active = ' . ($request->input('status') === 'active' ? 'true' : 'false'));
         }
 
         // Pagination: ?page=1&per_page=500
@@ -122,7 +237,7 @@ class ProductController extends Controller
     public function show(Request $request, $id)
     {
         $user = $request->user();
-        $product = Product::with(['store', 'company', 'category', 'supplier'])->find($id);
+        $product = Product::with(['store', 'company', 'category', 'supplier', 'priceTiers'])->find($id);
         if (!$product) {
             return response()->json([
                 'status' => 'failed',
@@ -160,6 +275,13 @@ class ProductController extends Controller
             'product_code' => 'nullable|string|max:100',
             'price' => 'nullable|numeric|min:0',
             'unit_cost' => 'nullable|numeric|min:0',
+            'shipping_cost' => 'nullable|numeric|min:0',
+            'logistics_cost' => 'nullable|numeric|min:0',
+            'margin_amount' => 'nullable|numeric|min:0',
+            'last_price' => 'nullable|numeric|min:0',
+            'price_tiers' => 'nullable|array',
+            'price_tiers.*.tier_name' => 'required_with:price_tiers|string|max:100',
+            'price_tiers.*.price' => 'required_with:price_tiers|numeric|min:0',
             'stock_quantity' => 'nullable|integer|min:0',
             'category' => 'nullable|string|max:255',
             'category_id' => 'nullable|uuid|exists:product_categories,id',
@@ -218,6 +340,9 @@ class ProductController extends Controller
                 'short_description',
                 'price',
                 'unit_cost',
+                'shipping_cost',
+                'logistics_cost',
+                'margin_amount',
                 'last_price',
                 'stock_quantity',
                 'low_stock_threshold',
@@ -252,6 +377,52 @@ class ProductController extends Controller
                 'is_active'
             ]);
 
+            // Auto-resolve/create a relational category from the free-text category name
+            // if the caller didn't already supply a category_id.
+            if (empty($productData['category_id']) && !empty($productData['category'])) {
+                $productData['category_id'] = $this->resolveCategoryId(
+                    $request->input('company_id', $user->company_id),
+                    $productData['category']
+                );
+            }
+
+            // Enforce: price / last price / variant prices / tier prices must exceed
+            // (unit cost + shipping cost + logistics cost + margin amount).
+            $minPrice = $this->computeMinimumValidPrice(
+                $productData['unit_cost'] ?? null,
+                $productData['shipping_cost'] ?? null,
+                $productData['logistics_cost'] ?? null,
+                $productData['margin_amount'] ?? null
+            );
+            $priceErrors = $this->validatePricesAgainstMinimum($minPrice, [
+                'Selling price' => $productData['price'] ?? null,
+                'Last price' => $productData['last_price'] ?? null,
+            ]);
+            if (is_array($request->input('price_tiers'))) {
+                foreach ($request->input('price_tiers') as $tier) {
+                    if (isset($tier['price'])) {
+                        $priceErrors = array_merge($priceErrors, $this->validatePricesAgainstMinimum($minPrice, [
+                            ($tier['tier_name'] ?? 'Price tier') => $tier['price'],
+                        ]));
+                    }
+                }
+            }
+            if (is_array($request->input('variations'))) {
+                foreach ($request->input('variations') as $variant) {
+                    if (isset($variant['price'])) {
+                        $priceErrors = array_merge($priceErrors, $this->validatePricesAgainstMinimum($minPrice, [
+                            ('Variant "' . ($variant['name'] ?? '') . '" price') => $variant['price'],
+                        ]));
+                    }
+                }
+            }
+            if (!empty($priceErrors)) {
+                return response()->json([
+                    'status' => 'failed',
+                    'message' => implode(' ', $priceErrors),
+                ], 422);
+            }
+
             // Handle product images using ProductImageService
             $images = [];
 
@@ -285,6 +456,9 @@ class ProductController extends Controller
                 'short_description' => $productData['short_description'] ?? null,
                 'price' => $productData['price'] ?? null,
                 'unit_cost' => $productData['unit_cost'] ?? null,
+                'shipping_cost' => $productData['shipping_cost'] ?? 0,
+                'logistics_cost' => $productData['logistics_cost'] ?? 0,
+                'margin_amount' => $productData['margin_amount'] ?? 0,
                 'last_price' => $productData['last_price'] ?? null,
                 'stock_quantity' => $productData['stock_quantity'] ?? 0,
                 'low_stock_threshold' => $productData['low_stock_threshold'] ?? 10,
@@ -385,6 +559,10 @@ class ProductController extends Controller
                 $product->load('packagingUnits');
             }
 
+            // Create price tiers if provided
+            $this->syncPriceTiers($product, $request->input('price_tiers'));
+            $product->load('priceTiers');
+
             $response = [
                 'status' => 'success',
                 'message' => 'Product created successfully.',
@@ -432,7 +610,16 @@ class ProductController extends Controller
             'product_code' => 'nullable|string|max:100',
             'price' => 'sometimes|numeric|min:0',
             'unit_cost' => 'sometimes|numeric|min:0',
-            'stock_quantity' => 'sometimes|integer|min:0',
+            'shipping_cost' => 'nullable|numeric|min:0',
+            'logistics_cost' => 'nullable|numeric|min:0',
+            'margin_amount' => 'nullable|numeric|min:0',
+            'last_price' => 'nullable|numeric|min:0',
+            'price_tiers' => 'nullable|array',
+            'price_tiers.*.id' => 'nullable|uuid',
+            'price_tiers.*.tier_name' => 'required_with:price_tiers|string|max:100',
+            'price_tiers.*.price' => 'required_with:price_tiers|numeric|min:0',
+            // stock_quantity is intentionally NOT accepted here - quantity may only change via
+            // Stock Adjustment or Purchase Order receiving, never through a product edit.
             'category' => 'nullable|string|max:255',
             'category_id' => 'nullable|uuid|exists:product_categories,id',
             'sku' => 'nullable|string|max:255',
@@ -458,7 +645,8 @@ class ProductController extends Controller
             'variations.*.sku' => 'nullable|string|max:50',
             'variations.*.price' => 'nullable|numeric|min:0',
             'variations.*.cost' => 'nullable|numeric|min:0',
-            'variations.*.stock_quantity' => 'nullable|integer|min:0',
+            // variations.*.stock_quantity is intentionally NOT accepted here either - same rule
+            // applies to variant stock as to base product stock.
             'variations.*.store_id' => 'nullable|uuid|exists:stores,id',
             'images' => 'nullable|array',
             'tags' => 'nullable|array',
@@ -495,8 +683,12 @@ class ProductController extends Controller
                 'short_description',
                 'price',
                 'unit_cost',
+                'shipping_cost',
+                'logistics_cost',
+                'margin_amount',
                 'last_price',
-                'stock_quantity',
+                // NOTE: stock_quantity is deliberately excluded - quantity changes must go
+                // through Stock Adjustment or Purchase Order receiving, never a product edit.
                 'low_stock_threshold',
                 'category',
                 'category_id',
@@ -537,6 +729,50 @@ class ProductController extends Controller
                     $updateData[$field] = $request->input($field);
                     Log::info("Boolean field {$field} set", ['value' => $request->input($field), 'in_updateData' => $updateData[$field]]);
                 }
+            }
+
+            // Auto-resolve/create a relational category from the free-text category name
+            // if the caller didn't already supply a category_id.
+            if (empty($updateData['category_id']) && !empty($updateData['category'])) {
+                $updateData['category_id'] = $this->resolveCategoryId($product->company_id, $updateData['category']);
+            }
+
+            // Enforce: price / last price / variant prices / tier prices must exceed
+            // (unit cost + shipping cost + logistics cost + margin amount), using whichever
+            // of these values are being submitted vs. already on the product.
+            $minPrice = $this->computeMinimumValidPrice(
+                $updateData['unit_cost'] ?? $product->unit_cost,
+                $updateData['shipping_cost'] ?? $product->shipping_cost,
+                $updateData['logistics_cost'] ?? $product->logistics_cost,
+                $updateData['margin_amount'] ?? $product->margin_amount
+            );
+            $priceErrors = $this->validatePricesAgainstMinimum($minPrice, [
+                'Selling price' => $updateData['price'] ?? null,
+                'Last price' => $updateData['last_price'] ?? null,
+            ]);
+            if (is_array($request->input('price_tiers'))) {
+                foreach ($request->input('price_tiers') as $tier) {
+                    if (isset($tier['price'])) {
+                        $priceErrors = array_merge($priceErrors, $this->validatePricesAgainstMinimum($minPrice, [
+                            ($tier['tier_name'] ?? 'Price tier') => $tier['price'],
+                        ]));
+                    }
+                }
+            }
+            if (is_array($request->input('variations'))) {
+                foreach ($request->input('variations') as $variant) {
+                    if (isset($variant['price'])) {
+                        $priceErrors = array_merge($priceErrors, $this->validatePricesAgainstMinimum($minPrice, [
+                            ('Variant "' . ($variant['name'] ?? '') . '" price') => $variant['price'],
+                        ]));
+                    }
+                }
+            }
+            if (!empty($priceErrors)) {
+                return response()->json([
+                    'status' => 'failed',
+                    'message' => implode(' ', $priceErrors),
+                ], 422);
             }
 
             // Handle product images using ProductImageService
@@ -616,6 +852,10 @@ class ProductController extends Controller
                     if (!empty($variantImages)) {
                         $variantData['images'] = $this->imageService->processImages($variantImages, 'product-variants');
                     }
+
+                    // Quantity may only change via Stock Adjustment or Purchase Order receiving,
+                    // never through a product edit - strip it even if the client sent it.
+                    unset($variantData['stock_quantity']);
 
                     // Skip empty or incomplete variants
                     if (
@@ -720,6 +960,12 @@ class ProductController extends Controller
             if ($product->has_packaging) {
                 $product->load('packagingUnits');
             }
+
+            // Sync price tiers if provided
+            if ($request->has('price_tiers')) {
+                $this->syncPriceTiers($product, $request->input('price_tiers'));
+            }
+            $product->load('priceTiers');
 
             $response = [
                 'status' => 'success',
@@ -1066,6 +1312,12 @@ class ProductController extends Controller
                     return filter_var($value, FILTER_VALIDATE_BOOLEAN, FILTER_NULL_ON_FAILURE) ?? $default;
                 };
 
+                // Auto-resolve/create a relational category from the free-text category name
+                // if this row didn't already supply a category_id.
+                if (empty($productData['category_id']) && !empty($productData['category'])) {
+                    $productData['category_id'] = $this->resolveCategoryId($user->company_id, $productData['category']);
+                }
+
                 // Create product with proper boolean values
                 $product = Product::create([
                     'id' => (string) Str::uuid(),
@@ -1077,6 +1329,9 @@ class ProductController extends Controller
                     'short_description' => $productData['short_description'] ?? null,
                     'price' => $productData['price'] ?? null,
                     'unit_cost' => $productData['unit_cost'] ?? null,
+                    'shipping_cost' => $productData['shipping_cost'] ?? 0,
+                    'logistics_cost' => $productData['logistics_cost'] ?? 0,
+                    'margin_amount' => $productData['margin_amount'] ?? 0,
                     'last_price' => $productData['last_price'] ?? null,
                     'stock_quantity' => $productData['stock_quantity'] ?? 0,
                     'low_stock_threshold' => $productData['low_stock_threshold'] ?? 10,
@@ -1383,7 +1638,7 @@ class ProductController extends Controller
             }
 
             if ($request->has('batch_number')) {
-                $query->where('batch_number', 'like', '%' . $request->batch_number . '%');
+                $query->where('batch_number', 'ilike', '%' . $request->batch_number . '%');
             }
 
             // Sorting

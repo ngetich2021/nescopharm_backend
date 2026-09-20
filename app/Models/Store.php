@@ -39,6 +39,16 @@ class Store extends Model
         'updated_at' => 'datetime',
     ];
 
+    // Boolean mutator for PostgreSQL compatibility
+    public function setIsActiveAttribute($value)
+    {
+        if ($value === null) {
+            $this->attributes['is_active'] = 'false';
+        } else {
+            $this->attributes['is_active'] = ($value === true || $value === 'true' || $value === 1 || $value === '1') ? 'true' : 'false';
+        }
+    }
+
         /**
      * Always return the short store code when accessing store_code
      */

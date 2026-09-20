@@ -74,8 +74,8 @@ class AccountsPayableController extends Controller
         // Search by invoice number or reference
         if ($request->has('search')) {
             $query->where(function ($q) use ($request) {
-                $q->where('invoice_number', 'like', '%' . $request->search . '%')
-                    ->orWhere('reference', 'like', '%' . $request->search . '%');
+                $q->where('invoice_number', 'ilike', '%' . $request->search . '%')
+                    ->orWhere('reference', 'ilike', '%' . $request->search . '%');
             });
         }
 

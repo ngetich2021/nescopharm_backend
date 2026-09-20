@@ -68,8 +68,8 @@ class AccountsReceivableController extends Controller
         }
         if ($request->has('search')) {
             $query->where(function ($q) use ($request) {
-                $q->where('invoice_number', 'like', '%' . $request->search . '%')
-                    ->orWhere('reference', 'like', '%' . $request->search . '%');
+                $q->where('invoice_number', 'ilike', '%' . $request->search . '%')
+                    ->orWhere('reference', 'ilike', '%' . $request->search . '%');
             });
         }
         $receivables = $query->orderBy('due_date', 'asc')

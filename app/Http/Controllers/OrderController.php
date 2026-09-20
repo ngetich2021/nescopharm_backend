@@ -18,20 +18,23 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 use App\Http\Traits\HandlesDatabaseErrors;
 use App\Services\PackagingCalculatorService;
+use App\Services\CustomerCreditTermsResolver;
 
 class OrderController extends Controller
 {
     use HandlesDatabaseErrors;
 
     protected $calculator;
+    protected CustomerCreditTermsResolver $creditTermsResolver;
 
     /**
      * Initialize the controller with middleware for authentication.
      */
-    public function __construct(PackagingCalculatorService $calculator)
+    public function __construct(PackagingCalculatorService $calculator, CustomerCreditTermsResolver $creditTermsResolver)
     {
         $this->middleware('auth:sanctum');
         $this->calculator = $calculator;
+        $this->creditTermsResolver = $creditTermsResolver;
     }
 
     /**
@@ -133,6 +136,17 @@ class OrderController extends Controller
                     }
                 }
 
+                if ($request->filled('search')) {
+                    $term = $request->input('search');
+                    $query->where(function ($q) use ($term) {
+                        $q->where('order_number', 'ilike', "%{$term}%")
+                            ->orWhereHas('customer', function ($cq) use ($term) {
+                                $cq->where('name', 'ilike', "%{$term}%")
+                                    ->orWhere('business_name', 'ilike', "%{$term}%");
+                            });
+                    });
+                }
+
                 $perPage = (int) $request->input('per_page', 1000);
                 $orders = $query->select('id', 'customer_id', 'company_id', 'order_number', 'total_amount', 'discount', 'tax', 'final_amount', 'status', 'payment_status', 'created_at', 'updated_at')
                     ->orderBy('created_at', 'desc')
@@ -230,10 +244,14 @@ class OrderController extends Controller
     {
         $validator = Validator::make($request->all(), [
             'customer_id' => 'nullable|uuid|exists:customers,id',
+            'sales_rep_id' => 'nullable|uuid|exists:users,id',
             'discount' => 'nullable|numeric|min:0|max:999999.99',
             'tax' => 'nullable|numeric|min:0|max:999999.99',
             'status' => 'required|string|in:pending,processing,completed,cancelled',
             'payment_status' => 'nullable|string',
+            'payment_option' => 'sometimes|in:instant,credit',
+            'payment_terms' => 'nullable|string',
+            'due_date' => 'nullable|date',
             'delivery_location_id' => 'nullable|uuid|exists:delivery_locations,id',
             'tracking_number' => 'nullable|string|max:100',
             'amount_paid' => 'nullable|numeric|min:0|max:999999.99',
@@ -291,6 +309,24 @@ class OrderController extends Controller
                         'message' => 'Unauthorized to create orders for this customer’s company.',
                     ], 403);
                 }
+            }
+
+            // Work out payment_type/credit_terms_days from the customer's registered
+            // payment method (mirrors InvoiceController's cash/credit resolution), unless
+            // this is an explicit instant/cash sale or there's no customer on the order yet.
+            $paymentOption = $request->input('payment_option');
+            if ($paymentOption === 'instant' || !$customer) {
+                $orderCredit = [
+                    'payment_type' => 'cash',
+                    'credit_terms_days' => null,
+                ];
+            } else {
+                $orderCredit = $this->creditTermsResolver->resolve(
+                    $customer,
+                    $request->input('order_date', now()->toDateString()),
+                    $request->input('due_date'),
+                    $request->input('payment_terms'),
+                );
             }
 
             // Validate delivery location if provided
@@ -425,7 +461,7 @@ class OrderController extends Controller
                 $totalTaxAmount += $itemTaxAmount;
             }
 
-            return DB::transaction(function () use ($request, $user, $customer, $totalAmount, $items, $belowMinimumPrice, $totalTaxAmount) {
+            return DB::transaction(function () use ($request, $user, $customer, $totalAmount, $items, $belowMinimumPrice, $totalTaxAmount, $orderCredit) {
                 $discount = $request->input('discount', 0);
                 // Use calculated tax if not provided manually (or overwrite manual if we want strict calculation - plan said overwrite/replace)
                 // The plan said: "The order.tax field currently accepts a manual input. This will be replaced/overwritten by the sum of calculated taxes from items."
@@ -452,6 +488,9 @@ class OrderController extends Controller
                     'id' => (string) Str::uuid(),
                     'order_number' => $orderNumber,
                     'customer_id' => $request->input('customer_id'),
+                    'sales_rep_id' => $request->input('sales_rep_id'),
+                    'payment_type' => $orderCredit['payment_type'],
+                    'credit_terms_days' => $orderCredit['credit_terms_days'],
                     'company_id' => $user->company_id,
                     'total_amount' => $totalAmount,
                     'discount' => $discount,
@@ -579,6 +618,8 @@ class OrderController extends Controller
             'tax' => 'sometimes|numeric|min:0|max:999999.99',
             'status' => 'sometimes|string|in:pending,processing,completed,cancelled',
             'payment_status' => 'sometimes|string|in:unpaid,partial,paid',
+            'payment_type' => 'sometimes|in:cash,credit',
+            'credit_terms_days' => 'nullable|integer|min:0',
             'delivery_location_id' => 'nullable|uuid|exists:delivery_locations,id',
             'tracking_number' => 'nullable|string|max:100',
             'amount_paid' => 'sometimes|numeric|min:0|max:999999.99',
@@ -760,6 +801,8 @@ class OrderController extends Controller
                     'customer_id',
                     'status',
                     'payment_status',
+                    'payment_type',
+                    'credit_terms_days',
                     'delivery_location_id',
                     'tracking_number',
                     'amount_paid',

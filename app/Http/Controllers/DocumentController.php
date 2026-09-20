@@ -61,6 +61,27 @@ class DocumentController extends Controller
         return $role->hasPermission($permission);
     }
 
+    /**
+     * Resolve a browser-accessible URL for a stored path. Cloud disks (S3/R2)
+     * require a signed, time-limited URL since the bucket is not publicly
+     * readable — mirrors ProductImageService::getUrl().
+     */
+    protected function getStorageUrl(string $path): string
+    {
+        if ($this->disk === 's3' || config("filesystems.disks.{$this->disk}.driver") === 's3') {
+            try {
+                return Storage::disk($this->disk)->temporaryUrl(
+                    $path,
+                    now()->addHours(24)
+                );
+            } catch (\Exception $e) {
+                return Storage::disk($this->disk)->url($path);
+            }
+        }
+
+        return Storage::disk($this->disk)->url($path);
+    }
+
     public function index(Request $request)
     {
         $user = $request->user();
@@ -144,7 +165,7 @@ class DocumentController extends Controller
                 $stored = Storage::disk($this->disk)->put($path, file_get_contents($file->getRealPath()));
 
                 if ($stored) {
-                    $documentImageUrl = Storage::disk($this->disk)->url($path);
+                    $documentImageUrl = $this->getStorageUrl($path);
                 } else {
                     throw new \Exception('Failed to store document image');
                 }
@@ -232,7 +253,7 @@ class DocumentController extends Controller
                 $stored = Storage::disk($this->disk)->put($path, file_get_contents($file->getRealPath()));
 
                 if ($stored) {
-                    $documentImageUrl = Storage::disk($this->disk)->url($path);
+                    $documentImageUrl = $this->getStorageUrl($path);
                 } else {
                     throw new \Exception('Failed to store document image');
                 }

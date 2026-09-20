@@ -2,8 +2,11 @@
 
 namespace App\Http\Controllers;
 
+use App\Http\Traits\ChecksStockAvailability;
 use App\Models\Breakage;
 use App\Models\BreakageItem;
+use App\Models\Product;
+use App\Models\ProductVariant;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Validator;
@@ -14,6 +17,7 @@ use Illuminate\Support\Facades\Storage;
 
 class BreakageController extends Controller
 {
+    use ChecksStockAvailability;
 
     protected function hasPermission(Request $request, $permission, $resourceCompanyId = null)
     {
@@ -264,7 +268,14 @@ class BreakageController extends Controller
                         'updated_at' => now(),
                     ]);
 
-                    // Inventory tracking: move quantity from available to damaged, set inventory_status
+                    // Inventory tracking: move quantity from available to damaged, set
+                    // inventory_status - never record more breakage than is actually in stock.
+                    $breakageProduct = Product::find($item['product_id']);
+                    $breakageVariant = !empty($item['variant_id']) ? ProductVariant::find($item['variant_id']) : null;
+                    if ($error = $this->insufficientStockMessage($breakageProduct, $breakageVariant, (int) $item['quantity'])) {
+                        throw new \RuntimeException($error);
+                    }
+
                     DB::table('products')
                         ->where('id', $item['product_id'])
                         ->where('company_id', $companyId)

@@ -20,6 +20,8 @@ class Role extends Model
         'name',
         'description',
         'is_active',
+        'is_sales_rep',
+        'is_warehouse_incharge',
         'company_id',
     ];
 
@@ -27,6 +29,8 @@ class Role extends Model
         'id' => 'string',
         'company_id' => 'string',
         'is_active' => 'boolean',
+        'is_sales_rep' => 'boolean',
+        'is_warehouse_incharge' => 'boolean',
         'created_at' => 'datetime',
         'updated_at' => 'datetime',
     ];
@@ -108,10 +112,30 @@ class Role extends Model
         }
     }
 
+    public function setIsSalesRepAttribute($value)
+    {
+        $this->attributes['is_sales_rep'] = ($value === true || $value === 'true' || $value === 1 || $value === '1') ? 'true' : 'false';
+    }
+
+    public function setIsWarehouseInchargeAttribute($value)
+    {
+        $this->attributes['is_warehouse_incharge'] = ($value === true || $value === 'true' || $value === 1 || $value === '1') ? 'true' : 'false';
+    }
+
     // Scopes for PostgreSQL boolean queries
     public function scopeActive($query)
     {
         return $query->whereRaw('is_active = true');
+    }
+
+    public function scopeSalesRep($query)
+    {
+        return $query->whereRaw('is_sales_rep = true');
+    }
+
+    public function scopeWarehouseIncharge($query)
+    {
+        return $query->whereRaw('is_warehouse_incharge = true');
     }
 
     public function scopeForCompany($query, $companyId)

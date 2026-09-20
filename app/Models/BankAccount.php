@@ -163,15 +163,17 @@ class BankAccount extends Model
         return $query->where('account_type', $type);
     }
 
-    // Boolean mutators for PostgreSQL compatibility
+    // Boolean mutators for PostgreSQL compatibility. PDO can bind a native PHP
+    // bool as an integer, which Postgres rejects for a boolean column on insert,
+    // so store the literal 'true'/'false' string instead (as elsewhere in the app).
     public function setIsActiveAttribute($value)
     {
-        $this->attributes['is_active'] = $value === true || $value === 'true' || $value === 1 || $value === '1';
+        $this->attributes['is_active'] = filter_var($value, FILTER_VALIDATE_BOOLEAN) ? 'true' : 'false';
     }
 
     public function setAllowOverdraftAttribute($value)
     {
-        $this->attributes['allow_overdraft'] = $value === true || $value === 'true' || $value === 1 || $value === '1';
+        $this->attributes['allow_overdraft'] = filter_var($value, FILTER_VALIDATE_BOOLEAN) ? 'true' : 'false';
     }
 
 }

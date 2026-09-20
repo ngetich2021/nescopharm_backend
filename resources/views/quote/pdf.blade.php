@@ -42,23 +42,33 @@ body { font-family: 'Figtree'; background: #fff; }
         .summary-table .total-value { font-weight: 700; font-size: 1.15rem; }
         .footer { margin-top: 56px; font-size: 1.05rem; color: #6b7280; }
         .valid-until { margin-top: 20px; padding: 12px 20px; background: #fef3c7; border-radius: 8px; font-weight: 600; color: #92400e; }
+        .letterhead-banner { width: 100%; display: block; margin-bottom: 24px; }
     </style>
 </head>
 <body>
     <div class="quote-box">
+        @php $hasLetterhead = isset($quote->company) && $quote->company->letterhead_url; @endphp
+        @if($hasLetterhead)
+            <img src="{{ $quote->company->letterhead_url }}" alt="{{ $quote->company->name }}" class="letterhead-banner"/>
+        @endif
         <div class="flex-row" style="align-items: flex-start; margin-bottom: 0;">
-            <div style="display: flex; align-items: flex-start; margin-top: 0; margin-bottom: 0;">
-                @if(isset($quote->company) && $quote->company->logo_url)
-                    <img src="{{ $quote->company->logo_url }}" alt="Logo" class="company-logo" style="background: none;"/>
-                @else
-                    <div class="company-logo">
-                        {{ strtoupper(substr($quote->company->name ?? 'C', 0, 1)) }}
+            @if($hasLetterhead)
+                {{-- Company identity already shown once, in the letterhead above --}}
+                <div></div>
+            @else
+                <div style="display: flex; align-items: flex-start; margin-top: 0; margin-bottom: 0;">
+                    @if(isset($quote->company) && $quote->company->logo_url)
+                        <img src="{{ $quote->company->logo_url }}" alt="Logo" class="company-logo" style="background: none;"/>
+                    @else
+                        <div class="company-logo">
+                            {{ strtoupper(substr($quote->company->name ?? 'C', 0, 1)) }}
+                        </div>
+                    @endif
+                    <div class="company-info" style="margin-left: 12px;">
+                        <div class="company-name">{{ $quote->company->name ?? 'Company Name' }}</div>
                     </div>
-                @endif
-                <div class="company-info" style="margin-left: 12px;">
-                    <div class="company-name">{{ $quote->company->name ?? 'Company Name' }}</div>
                 </div>
-            </div>
+            @endif
             <div class="quote-title" style="text-align: right; min-width: 180px; align-self: flex-start; margin-top: 0;">QUOTATION</div>
         </div>
 

@@ -10,6 +10,9 @@ class CustomerAccount extends Model
     // Ensure proper casting for PostgreSQL booleans
     protected $casts = [
         'currently_defaulted' => 'boolean',
+        'credit_days' => 'integer',
+        'pending_credit_days' => 'integer',
+        'credit_period_pd_cheque_days' => 'integer',
     ];
 
     protected $appends = [
@@ -53,19 +56,23 @@ class CustomerAccount extends Model
     public $incrementing = false;
     protected $keyType = 'string';
 
+    // NOTE: registered_business_name / nature_of_business / company_type / pin_number
+    // are NOT real columns on customer_accounts (confirmed against every migration) -
+    // they were dead fillable entries that made update() silently fail/error when
+    // those keys were present. That data lives on the linked Customer instead
+    // (business_name, nature_of_business, pin_number) - read it via $account->customer.
     protected $fillable = [
         'id',
         'customer_id',
         'company_id',
         'account_number',
-        'registered_business_name',
-        'nature_of_business',
         'certificate_of_incorporation_number',
-        'company_type',
-        'pin_number',
         'annual_turnover',
         'credit_required',
         'credit_period_required',
+        'credit_period_pd_cheque_days',
+        'credit_days',
+        'pending_credit_days',
         'pending_credit_limit',
         'currently_defaulted',
         'credit_terms',
@@ -73,21 +80,6 @@ class CustomerAccount extends Model
         'created_by',
     ];
 
-    /**
-     * Get the registered_business_name attribute in Title Case
-     */
-    public function getRegisteredBusinessNameAttribute($value)
-    {
-        return $value ? ucwords(strtolower($value)) : null;
-    }
-
-    /**
-     * Set the registered_business_name attribute to Title Case
-     */
-    public function setRegisteredBusinessNameAttribute($value)
-    {
-        $this->attributes['registered_business_name'] = $value ? ucwords(strtolower($value)) : null;
-    }
     public function customer()
     {
         return $this->belongsTo(Customer::class);
@@ -291,11 +283,13 @@ class CustomerAccount extends Model
      */
     public function getHasPendingCreditChangeAttribute()
     {
-        return !is_null($this->pending_credit_limit) && $this->pending_credit_limit != $this->credit_required;
+        $limitChanged = !is_null($this->pending_credit_limit) && $this->pending_credit_limit != $this->credit_required;
+        $daysChanged = !is_null($this->pending_credit_days) && $this->pending_credit_days != $this->credit_days;
+        return $limitChanged || $daysChanged;
     }
 
     /**
-     * Get the pending credit limit information
+     * Get the pending credit limit/terms information awaiting GM approval
      */
     public function getPendingCreditInfoAttribute()
     {
@@ -306,8 +300,10 @@ class CustomerAccount extends Model
         return [
             'current_limit' => $this->credit_required,
             'requested_limit' => $this->pending_credit_limit,
-            'change_amount' => $this->pending_credit_limit - $this->credit_required,
-            'change_type' => $this->pending_credit_limit > $this->credit_required ? 'increase' : 'decrease'
+            'change_amount' => is_null($this->pending_credit_limit) ? null : $this->pending_credit_limit - $this->credit_required,
+            'change_type' => is_null($this->pending_credit_limit) ? null : ($this->pending_credit_limit > $this->credit_required ? 'increase' : 'decrease'),
+            'current_credit_days' => $this->credit_days,
+            'requested_credit_days' => $this->pending_credit_days,
         ];
     }
 

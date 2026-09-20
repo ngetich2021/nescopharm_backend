@@ -33,6 +33,9 @@ class Invoice extends Model
         'invoice_number',
         'company_id',
         'customer_id',
+        'sales_rep_id',
+        'payment_type',
+        'credit_terms_days',
         'order_id',
         'payment_id',
         'type',
@@ -84,6 +87,7 @@ class Invoice extends Model
         'amount_paid' => 'decimal:2',
         'balance_amount' => 'decimal:2',
         'exchange_rate' => 'decimal:4',
+        'credit_terms_days' => 'integer',
         'invoice_date' => 'date',
         'due_date' => 'date',
         'sent_at' => 'datetime',
@@ -98,6 +102,8 @@ class Invoice extends Model
         'created_at' => 'datetime',
         'updated_at' => 'datetime',
     ];
+
+    protected $appends = ['days_remaining'];
 
     /**
      * PostgreSQL expects a native boolean. PDO may otherwise bind booleans as
@@ -133,7 +139,7 @@ class Invoice extends Model
                         $model->paid_at = now();
                     }
                 } elseif ($model->amount_paid > 0) {
-                    $model->status = $model->isOverdue() ? 'overdue' : 'sent';
+                    $model->status = $model->isOverdue() ? 'overdue' : 'partially_paid';
                 } else {
                     $model->status = $model->isOverdue() ? 'overdue' : $model->status;
                 }
@@ -165,6 +171,11 @@ class Invoice extends Model
     public function createdBy()
     {
         return $this->belongsTo(User::class, 'created_by');
+    }
+
+    public function salesRep()
+    {
+        return $this->belongsTo(User::class, 'sales_rep_id');
     }
 
     public function lineItems()
@@ -240,6 +251,19 @@ class Invoice extends Model
         }
 
         return now()->diffInDays($this->due_date);
+    }
+
+    /**
+     * Days until due_date (negative once overdue). Null once there's nothing left
+     * to collect, since it's no longer relevant for credit follow-up.
+     */
+    public function getDaysRemainingAttribute(): ?int
+    {
+        if ($this->balance_amount <= 0 || !$this->due_date) {
+            return null;
+        }
+
+        return (int) now()->startOfDay()->diffInDays($this->due_date->copy()->startOfDay(), false);
     }
 
     public function markAsSent()

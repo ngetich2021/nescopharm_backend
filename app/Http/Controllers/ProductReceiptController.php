@@ -4,6 +4,7 @@ namespace App\Http\Controllers;
 
 use App\Models\ProductReceipt;
 use App\Models\Supplier;
+use App\Services\LandedCostAllocationService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Validator;
@@ -15,11 +16,13 @@ class ProductReceiptController extends Controller
 {
 
     protected string $disk;
+    protected LandedCostAllocationService $landedCostService;
 
-    public function __construct()
+    public function __construct(LandedCostAllocationService $landedCostService)
     {
         $this->middleware('auth:sanctum');
         $this->disk = config('filesystems.default', 's3');
+        $this->landedCostService = $landedCostService;
     }
     protected function hasPermission(Request $request, $permission, $resourceCompanyId = null)
     {
@@ -38,6 +41,27 @@ class ProductReceiptController extends Controller
             return true;
         }
         return $role->hasPermission($permission);
+    }
+
+    /**
+     * Resolve a browser-accessible URL for a stored path. Cloud disks (S3/R2)
+     * require a signed, time-limited URL since the bucket is not publicly
+     * readable — mirrors ProductImageService::getUrl().
+     */
+    protected function getStorageUrl(string $path): string
+    {
+        if ($this->disk === 's3' || config("filesystems.disks.{$this->disk}.driver") === 's3') {
+            try {
+                return Storage::disk($this->disk)->temporaryUrl(
+                    $path,
+                    now()->addHours(24)
+                );
+            } catch (\Exception $e) {
+                return Storage::disk($this->disk)->url($path);
+            }
+        }
+
+        return Storage::disk($this->disk)->url($path);
     }
 
     /**
@@ -188,7 +212,7 @@ class ProductReceiptController extends Controller
                 $stored = Storage::disk($this->disk)->put($path, file_get_contents($file->getRealPath()));
 
                 if ($stored) {
-                    $uploadedDocumentUrl = Storage::disk($this->disk)->url($path);
+                    $uploadedDocumentUrl = $this->getStorageUrl($path);
                 } else {
                     throw new \Exception('Failed to store receipt document');
                 }
@@ -211,6 +235,8 @@ class ProductReceiptController extends Controller
                 'contractor_id' => 'nullable|uuid',
                 'received_by' => 'sometimes|uuid',
                 'document_url' => 'nullable|string',
+                'shipping_cost' => 'nullable|numeric|min:0',
+                'logistics_cost' => 'nullable|numeric|min:0',
                 'items' => 'sometimes|array|min:1',
                 'items.*.product_id' => 'nullable|uuid',
                 'items.*.sku' => 'nullable|string',
@@ -241,7 +267,11 @@ class ProductReceiptController extends Controller
                 'received_by' => $data['received_by'] ?? $receipt->received_by,
                 'store_id' => $data['store_id'] ?? $receipt->store_id,
                 'document_url' => $uploadedDocumentUrl ?? ($data['document_url'] ?? $receipt->document_url),
+                'shipping_cost' => $data['shipping_cost'] ?? $receipt->shipping_cost,
+                'logistics_cost' => $data['logistics_cost'] ?? $receipt->logistics_cost,
             ]);
+
+            $pricingWarnings = [];
 
             // Handle items update if provided
             if (isset($data['items'])) {
@@ -261,6 +291,8 @@ class ProductReceiptController extends Controller
                 }
                 // Delete old items
                 $receipt->productReceiptItems()->delete();
+
+                $landedCostLines = [];
 
                 // Add new items and update inventory
                 foreach ($data['items'] as $item) {
@@ -413,13 +445,32 @@ class ProductReceiptController extends Controller
                     } else if ($product) {
                         $product->increment('stock_quantity', $item['quantity']);
                     }
+
+                    if ($product) {
+                        $unitValue = $item['unit_cost'] ?? $item['unit_price'] ?? null;
+                        $landedCostLines[] = [
+                            'product' => $product,
+                            'quantity' => (int) $item['quantity'],
+                            'unit_value' => $unitValue !== null ? (float) $unitValue : 0,
+                            'unit_cost' => $unitValue !== null ? (float) $unitValue : null,
+                        ];
+                    }
                 }
+
+                // Distribute this receipt's shipping/logistics cost across the products
+                // received on it, updating each product's landed-cost basis.
+                $pricingWarnings = $this->landedCostService->apply(
+                    $landedCostLines,
+                    (float) ($data['shipping_cost'] ?? $receipt->shipping_cost ?? 0),
+                    (float) ($data['logistics_cost'] ?? $receipt->logistics_cost ?? 0)
+                );
             }
 
             DB::commit();
             return response()->json([
                 'status' => 'success',
                 'message' => 'Product receipt updated successfully.',
+                'pricing_warnings' => $pricingWarnings,
                 'receipt' => $receipt->fresh('productReceiptItems')
             ]);
         } catch (\Exception $e) {
@@ -482,7 +533,7 @@ class ProductReceiptController extends Controller
                 $stored = Storage::disk($this->disk)->put($path, file_get_contents($file->getRealPath()));
 
                 if ($stored) {
-                    $uploadedDocumentUrl = Storage::disk($this->disk)->url($path);
+                    $uploadedDocumentUrl = $this->getStorageUrl($path);
                 } else {
                     throw new \Exception('Failed to store receipt document');
                 }
@@ -509,6 +560,8 @@ class ProductReceiptController extends Controller
                     'document_type' => 'required|in:receipt,invoice,delivery_note,notification_note',
                     'product_receipt_number' => 'required|string|unique:product_receipts,product_receipt_number',
                     'received_by' => 'required|uuid',
+                    'shipping_cost' => 'nullable|numeric|min:0',
+                    'logistics_cost' => 'nullable|numeric|min:0',
                     'items' => 'required|array|min:1',
                     'reference_number' => 'nullable|string',
                     'items.*.product_id' => 'nullable|uuid',
@@ -548,7 +601,11 @@ class ProductReceiptController extends Controller
                     'received_by' => $receiptData['received_by'],
                     'store_id' => $receiptData['store_id'],
                     'document_url' => $uploadedDocumentUrl ?? ($receiptData['document_url'] ?? null),
+                    'shipping_cost' => $receiptData['shipping_cost'] ?? 0,
+                    'logistics_cost' => $receiptData['logistics_cost'] ?? 0,
                 ]);
+
+                $landedCostLines = [];
 
                 // Create product receipt items and update inventory
                 foreach ($receiptData['items'] as $item) {
@@ -702,15 +759,37 @@ class ProductReceiptController extends Controller
                     } else if ($product) {
                         $product->increment('stock_quantity', $item['quantity']);
                     }
+
+                    if ($product) {
+                        $unitValue = $item['unit_cost'] ?? $item['unit_price'] ?? null;
+                        $landedCostLines[] = [
+                            'product' => $product,
+                            'quantity' => (int) $item['quantity'],
+                            'unit_value' => $unitValue !== null ? (float) $unitValue : 0,
+                            'unit_cost' => $unitValue !== null ? (float) $unitValue : null,
+                        ];
+                    }
                 }
 
-                $results[] = $receipt->load('productReceiptItems');
+                // Distribute this receipt's shipping/logistics cost across the products
+                // received on it, updating each product's landed-cost basis.
+                $pricingWarnings = $this->landedCostService->apply(
+                    $landedCostLines,
+                    (float) ($receiptData['shipping_cost'] ?? 0),
+                    (float) ($receiptData['logistics_cost'] ?? 0)
+                );
+
+                $results[] = [
+                    'receipt' => $receipt->load('productReceiptItems'),
+                    'pricing_warnings' => $pricingWarnings,
+                ];
             }
             DB::commit();
             return response()->json([
                 'status' => 'success',
                 'message' => 'Product receipt created successfully.',
-                'receipts' => $results
+                'receipts' => array_map(fn($r) => $r['receipt'], $results),
+                'pricing_warnings' => array_merge(...array_map(fn($r) => $r['pricing_warnings'], $results)),
             ], 201);
         } catch (\Exception $e) {
             DB::rollBack();

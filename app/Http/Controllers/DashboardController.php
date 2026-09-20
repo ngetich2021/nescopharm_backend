@@ -1274,41 +1274,34 @@ class DashboardController extends Controller
      */
     private function getInventoryLevels($companyId)
     {
+        // Single round-trip: totals plus the stock-distribution buckets via conditional SUMs,
+        // instead of two separate queries (matters on a high-latency DB connection).
         $inventoryData = Product::where('company_id', $companyId)
             ->selectRaw('
                 COUNT(*) as total_products,
                 SUM(stock_quantity) as total_stock,
                 SUM(stock_quantity * unit_cost) as total_value,
-                AVG(stock_quantity) as avg_stock_per_product
+                AVG(stock_quantity) as avg_stock_per_product,
+                SUM(CASE WHEN stock_quantity = 0 THEN 1 ELSE 0 END) as out_of_stock,
+                SUM(CASE WHEN stock_quantity > 0 AND stock_quantity <= low_stock_threshold THEN 1 ELSE 0 END) as low_stock,
+                SUM(CASE WHEN stock_quantity > low_stock_threshold AND stock_quantity <= (low_stock_threshold * 2) THEN 1 ELSE 0 END) as medium_stock,
+                SUM(CASE WHEN stock_quantity > (low_stock_threshold * 2) THEN 1 ELSE 0 END) as high_stock
             ')
             ->first();
 
-        $stockDistribution = Product::where('company_id', $companyId)
-            ->selectRaw('
-                CASE 
-                    WHEN stock_quantity = 0 THEN \'out_of_stock\'
-                    WHEN stock_quantity <= low_stock_threshold THEN \'low_stock\'
-                    WHEN stock_quantity <= (low_stock_threshold * 2) THEN \'medium_stock\'
-                    ELSE \'high_stock\'
-                END as stock_level,
-                COUNT(*) as product_count
-            ')
-            ->groupBy(DB::raw('
-                CASE 
-                    WHEN stock_quantity = 0 THEN \'out_of_stock\'
-                    WHEN stock_quantity <= low_stock_threshold THEN \'low_stock\'
-                    WHEN stock_quantity <= (low_stock_threshold * 2) THEN \'medium_stock\'
-                    ELSE \'high_stock\'
-                END
-            '))
-            ->get();
+        $stockDistribution = collect([
+            'out_of_stock' => (int) ($inventoryData->out_of_stock ?? 0),
+            'low_stock' => (int) ($inventoryData->low_stock ?? 0),
+            'medium_stock' => (int) ($inventoryData->medium_stock ?? 0),
+            'high_stock' => (int) ($inventoryData->high_stock ?? 0),
+        ])->filter(fn ($count) => $count > 0);
 
         return [
             'total_products' => (int) ($inventoryData->total_products ?? 0),
             'total_stock_units' => (int) ($inventoryData->total_stock ?? 0),
             'total_inventory_value' => (float) ($inventoryData->total_value ?? 0),
             'avg_stock_per_product' => (float) ($inventoryData->avg_stock_per_product ?? 0),
-            'stock_distribution' => $stockDistribution->pluck('product_count', 'stock_level'),
+            'stock_distribution' => $stockDistribution,
         ];
     }
 
@@ -1317,17 +1310,18 @@ class DashboardController extends Controller
      */
     private function getStockAlerts($companyId)
     {
-        $lowStockProducts = Product::where('company_id', $companyId)
-            ->whereRaw('stock_quantity <= low_stock_threshold')
-            ->where('stock_quantity', '>', 0)
+        // Single round-trip for both buckets, split client-side afterwards.
+        $alertProducts = Product::where('company_id', $companyId)
+            ->where(function ($query) {
+                $query->where('stock_quantity', 0)
+                    ->orWhereRaw('stock_quantity > 0 AND stock_quantity <= low_stock_threshold');
+            })
             ->select('id', 'name', 'sku', 'stock_quantity', 'low_stock_threshold')
             ->orderBy('stock_quantity')
             ->get();
 
-        $outOfStockProducts = Product::where('company_id', $companyId)
-            ->where('stock_quantity', 0)
-            ->select('id', 'name', 'sku', 'stock_quantity')
-            ->get();
+        $lowStockProducts = $alertProducts->filter(fn ($p) => $p->stock_quantity > 0)->values();
+        $outOfStockProducts = $alertProducts->filter(fn ($p) => $p->stock_quantity == 0)->values();
 
         return [
             'low_stock_products' => $lowStockProducts,
@@ -1382,18 +1376,18 @@ class DashboardController extends Controller
     private function getDeadStock($companyId)
     {
         $deadStockThreshold = Carbon::now()->subMonths(6);
-        
-        // Dead stock: products with stock but no sales in the last 6 months
-        $productIdsWithRecentSales = DB::table('order_items')
-            ->join('orders', 'order_items.order_id', '=', 'orders.id')
-            ->where('orders.company_id', $companyId)
-            ->where('orders.created_at', '>=', $deadStockThreshold)
-            ->pluck('order_items.product_id')
-            ->unique();
 
+        // Dead stock: products with stock but no sales in the last 6 months.
+        // whereNotIn with a subquery keeps this to a single round-trip instead of two.
         $deadStockProducts = Product::where('company_id', $companyId)
             ->where('stock_quantity', '>', 0)
-            ->whereNotIn('id', $productIdsWithRecentSales)
+            ->whereNotIn('id', function ($query) use ($companyId, $deadStockThreshold) {
+                $query->select('order_items.product_id')
+                    ->from('order_items')
+                    ->join('orders', 'order_items.order_id', '=', 'orders.id')
+                    ->where('orders.company_id', $companyId)
+                    ->where('orders.created_at', '>=', $deadStockThreshold);
+            })
             ->selectRaw('
                 id, name, sku, stock_quantity, unit_cost,
                 (stock_quantity * unit_cost) as dead_stock_value

@@ -77,6 +77,19 @@ class Customer extends Model
         'contact_person_phone',
         'contact_person_email',
         'business_name',
+        'trading_name',
+        'business_type',
+        'registration_number',
+        'ppb_license_number',
+        'website',
+        'telephone',
+        'region',
+        'county',
+        'accounts_contact_name',
+        'accounts_contact_designation',
+        'accounts_contact_phone',
+        'accounts_contact_email',
+        'pending_credit_application',
         'nature_of_business',
         'pin_number',
         'total_spend',
@@ -156,6 +169,7 @@ class Customer extends Model
         'id' => 'string',
         'company_id' => 'string',
         'tags' => 'array',
+        'pending_credit_application' => 'array',
         'last_contact_date' => 'datetime',
         'total_spend' => 'decimal:2',
         'total_orders' => 'integer',
@@ -163,6 +177,19 @@ class Customer extends Model
         'created_at' => 'datetime',
         'updated_at' => 'datetime',
     ];
+
+    /**
+     * Two-stage credit-approval log for rep-created customers.
+     */
+    public function approvals()
+    {
+        return $this->hasMany(CustomerApproval::class, 'customer_id');
+    }
+
+    public function latestApproval()
+    {
+        return $this->hasOne(CustomerApproval::class, 'customer_id')->latestOfMany();
+    }
 
     public function company()
     {

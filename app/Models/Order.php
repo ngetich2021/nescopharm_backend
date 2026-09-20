@@ -83,6 +83,9 @@ class Order extends Model
         'id',
         'order_number',
         'customer_id',
+        'sales_rep_id',
+        'payment_type',
+        'credit_terms_days',
         'total_amount',
         'status',
         'company_id',
@@ -109,6 +112,7 @@ class Order extends Model
         'tax' => 'decimal:2',
         'final_amount' => 'decimal:2',
         'amount_paid' => 'decimal:2',
+        'credit_terms_days' => 'integer',
         'below_minimum_price' => 'boolean',
         'requires_approval' => 'boolean',
         'created_at' => 'datetime',
@@ -121,9 +125,19 @@ class Order extends Model
         return $this->belongsTo(Customer::class);
     }
 
+    public function salesRep()
+    {
+        return $this->belongsTo(User::class, 'sales_rep_id');
+    }
+
     public function company()
     {
         return $this->belongsTo(Company::class);
+    }
+
+    public function invoice()
+    {
+        return $this->hasOne(Invoice::class);
     }
 
     public function orderItems()

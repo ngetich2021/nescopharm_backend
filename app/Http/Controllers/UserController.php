@@ -578,18 +578,36 @@ class UserController extends Controller
                     }
                 }
                 if ($request->filled('email')) {
-                    $query->where('email', 'like', '%' . $request->input('email') . '%');
+                    $query->where('email', 'ilike', '%' . $request->input('email') . '%');
                 }
                 if ($request->filled('first_name')) {
-                    $query->where('first_name', 'like', '%' . $request->input('first_name') . '%');
+                    $query->where('first_name', 'ilike', '%' . $request->input('first_name') . '%');
                 }
                 if ($request->filled('last_name')) {
-                    $query->where('last_name', 'like', '%' . $request->input('last_name') . '%');
+                    $query->where('last_name', 'ilike', '%' . $request->input('last_name') . '%');
                 }
                 if ($request->boolean('include_deleted')) {
                     $query->withTrashed();
                 } elseif ($request->boolean('only_deleted')) {
                     $query->onlyTrashed();
+                }
+                if ($request->filled('role_scope')) {
+                    $roleScope = $request->input('role_scope');
+                    if ($roleScope === 'warehouse_incharge') {
+                        $query->whereHas('role', function ($q) {
+                            $q->whereRaw('is_warehouse_incharge = true');
+                        });
+                    } elseif ($roleScope === 'exclude_sales_rep') {
+                        // Sales Reps are "ground people" and shouldn't show up as
+                        // eligible dispatch approvers - but a user with no role
+                        // assigned yet is by definition not a rep, so include them.
+                        $query->where(function ($q) {
+                            $q->whereDoesntHave('role')
+                                ->orWhereHas('role', function ($rq) {
+                                    $rq->whereRaw('is_sales_rep = false');
+                                });
+                        });
+                    }
                 }
 
                 $users = $query->orderBy('first_name', 'asc')->get();
@@ -802,6 +820,8 @@ class UserController extends Controller
                         'id' => $role->id,
                         'name' => $role->name,
                         'description' => $role->description,
+                        'is_sales_rep' => (bool) $role->is_sales_rep,
+                        'is_warehouse_incharge' => (bool) $role->is_warehouse_incharge,
                         'permissions' => $permissions,
                     ] : null,
                 ],

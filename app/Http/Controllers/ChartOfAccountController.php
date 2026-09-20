@@ -66,9 +66,9 @@ class ChartOfAccountController extends Controller
         if ($request->filled('search')) {
             $search = $request->input('search');
             $query->where(function ($q) use ($search) {
-                $q->where('account_name', 'like', '%' . $search . '%')
-                  ->orWhere('account_code', 'like', '%' . $search . '%')
-                  ->orWhere('description', 'like', '%' . $search . '%');
+                $q->where('account_name', 'ilike', '%' . $search . '%')
+                  ->orWhere('account_code', 'ilike', '%' . $search . '%')
+                  ->orWhere('description', 'ilike', '%' . $search . '%');
             });
         }
 

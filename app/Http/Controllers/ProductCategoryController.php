@@ -91,7 +91,7 @@ class ProductCategoryController extends Controller
                 $query->where('is_active', $request->boolean('is_active') ? 'true' : 'false');
             }
             if ($request->filled('search')) {
-                $query->where('name', 'like', '%' . $request->input('search') . '%');
+                $query->where('name', 'ilike', '%' . $request->input('search') . '%');
             }
             $query->orderBy($request->input('sort_by', 'name'), $request->input('sort_direction', 'asc'));
             $categories = $query->get();

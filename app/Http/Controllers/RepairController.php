@@ -3,6 +3,9 @@
 namespace App\Http\Controllers;
 
 use App\Http\Controllers\Controller;
+use App\Http\Traits\ChecksStockAvailability;
+use App\Models\Product;
+use App\Models\ProductVariant;
 use App\Models\Repair;
 use App\Models\RepairItem;
 use Illuminate\Http\Request;
@@ -13,6 +16,7 @@ use Illuminate\Support\Facades\Log;
 
 class RepairController extends Controller
 {
+    use ChecksStockAvailability;
 
 
     protected function hasPermission(Request $request, $permission, $resourceCompanyId = null)
@@ -126,7 +130,16 @@ class RepairController extends Controller
                             'notes' => $itemData['notes'] ?? null,
                         ]);
                         $updatedItemIds[] = $newItem->id;
-                        // Inventory tracking for new item
+                        // Inventory tracking for new item - never pull more stock into a
+                        // repair than is actually available.
+                        $repairProduct = Product::find($itemData['product_id']);
+                        $repairVariant = !empty($itemData['product_variant'])
+                            ? ProductVariant::find($itemData['product_variant'])
+                            : null;
+                        if ($error = $this->insufficientStockMessage($repairProduct, $repairVariant, (int) $itemData['quantity'])) {
+                            throw new \RuntimeException($error);
+                        }
+
                         DB::table('products')
                             ->where('id', $itemData['product_id'])
                             ->where('company_id', $companyId)
@@ -173,7 +186,7 @@ class RepairController extends Controller
             ->orderBy('repair_number', 'desc')
             ->first();
 
-        $nextNumber = $lastRepair ? (int)substr($lastRepair->repair_number, strlen($prefix)) + 1 : 1;
+        $nextNumber = $lastRepair ? (int)substr($lastRepair->getRawOriginal('repair_number'), strlen($prefix)) + 1 : 1;
         return $prefix . str_pad($nextNumber, 4, '0', STR_PAD_LEFT);
     }
 
@@ -274,7 +287,16 @@ class RepairController extends Controller
                         'repaired' => $repaired,
                     ]);
 
-                    // Inventory tracking: move quantity to on_hold/under_repair
+                    // Inventory tracking: move quantity to on_hold/under_repair - never
+                    // pull more stock into a repair than is actually available.
+                    $repairProduct = Product::find($item['product_id']);
+                    $repairVariant = !empty($item['product_variant'])
+                        ? ProductVariant::find($item['product_variant'])
+                        : null;
+                    if ($error = $this->insufficientStockMessage($repairProduct, $repairVariant, (int) $item['quantity'])) {
+                        throw new \RuntimeException($error);
+                    }
+
                     DB::table('products')
                         ->where('id', $item['product_id'])
                         ->where('company_id', $companyId)

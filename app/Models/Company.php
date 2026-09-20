@@ -29,6 +29,7 @@ class Company extends Model
         'postal_code',
         'website',
         'logo_url',
+        'letterhead_url',
         'is_active',
         'is_first_time',
         'current_subscription_id',

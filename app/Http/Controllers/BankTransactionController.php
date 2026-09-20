@@ -82,10 +82,10 @@ class BankTransactionController extends Controller
         if ($request->filled('search')) {
             $search = $request->input('search');
             $query->where(function ($q) use ($search) {
-                $q->where('description', 'like', '%' . $search . '%')
-                    ->orWhere('transaction_reference', 'like', '%' . $search . '%')
-                    ->orWhere('bank_reference', 'like', '%' . $search . '%')
-                    ->orWhere('payee_payer', 'like', '%' . $search . '%');
+                $q->where('description', 'ilike', '%' . $search . '%')
+                    ->orWhere('transaction_reference', 'ilike', '%' . $search . '%')
+                    ->orWhere('bank_reference', 'ilike', '%' . $search . '%')
+                    ->orWhere('payee_payer', 'ilike', '%' . $search . '%');
             });
         }
 

@@ -77,15 +77,15 @@ class JournalEntryController extends Controller
         }
 
         if ($request->filled('reference')) {
-            $query->where('reference', 'like', '%' . $request->input('reference') . '%');
+            $query->where('reference', 'ilike', '%' . $request->input('reference') . '%');
         }
 
         if ($request->filled('search')) {
             $search = $request->input('search');
             $query->where(function ($q) use ($search) {
-                $q->where('reference', 'like', '%' . $search . '%')
-                  ->orWhere('description', 'like', '%' . $search . '%')
-                  ->orWhere('memo', 'like', '%' . $search . '%');
+                $q->where('reference', 'ilike', '%' . $search . '%')
+                  ->orWhere('description', 'ilike', '%' . $search . '%')
+                  ->orWhere('memo', 'ilike', '%' . $search . '%');
             });
         }
 

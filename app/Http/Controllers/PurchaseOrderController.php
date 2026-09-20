@@ -6,6 +6,7 @@ use App\Models\PurchaseOrder;
 use App\Models\PurchaseOrderItem;
 use App\Models\Product;
 use App\Models\ProductVariant;
+use App\Services\LandedCostAllocationService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Validator;
 use Illuminate\Support\Facades\Log;
@@ -14,9 +15,12 @@ use Illuminate\Support\Str;
 
 class PurchaseOrderController extends Controller
 {
-    public function __construct()
+    protected LandedCostAllocationService $landedCostService;
+
+    public function __construct(LandedCostAllocationService $landedCostService)
     {
         $this->middleware('auth:sanctum');
+        $this->landedCostService = $landedCostService;
     }
 
     protected function hasPermission(Request $request, $permission, $resourceCompanyId = null)
@@ -139,6 +143,8 @@ class PurchaseOrderController extends Controller
             'delivery_date' => 'nullable|date|after_or_equal:order_date',
             'store_id' => 'nullable|string|exists:stores,id',
             'currency_code' => 'nullable|string|size:3',
+            'shipping_cost' => 'nullable|numeric|min:0',
+            'logistics_cost' => 'nullable|numeric|min:0',
             'items' => 'required|array|min:1',
             'items.*.product_id' => 'required|string|exists:products,id',
             'items.*.variant_id' => 'nullable|string|exists:product_variants,id',
@@ -167,6 +173,8 @@ class PurchaseOrderController extends Controller
                 'delivery_date' => $request->input('delivery_date'),
                 'store_id' => $request->input('store_id'),
                 'currency_code' => $request->input('currency_code', 'KES'),
+                'shipping_cost' => $request->input('shipping_cost', 0),
+                'logistics_cost' => $request->input('logistics_cost', 0),
                 'status' => 'pending',
                 'created_by' => $user->id,
             ]);
@@ -178,8 +186,8 @@ class PurchaseOrderController extends Controller
                 }
 
                 $variant = null;
-                if ($itemData['variant_id']) {
-                    $variant = ProductVariant::where('id', $itemData['variant_id'])
+                if (($itemData['variant_id'] ?? null)) {
+                    $variant = ProductVariant::where('id', ($itemData['variant_id'] ?? null))
                         ->where('product_id', $itemData['product_id'])
                         ->first();
                     if (!$variant) {
@@ -197,7 +205,7 @@ class PurchaseOrderController extends Controller
                     'id' => (string) Str::uuid(),
                     'purchase_order_id' => $purchaseOrder->id,
                     'product_id' => $itemData['product_id'],
-                    'variant_id' => $itemData['variant_id'],
+                    'variant_id' => ($itemData['variant_id'] ?? null),
                     'quantity' => $itemData['quantity'],
                     'received_quantity' => 0, // Initialize as 0
                     'unit_price' => $itemData['unit_price'],
@@ -262,6 +270,8 @@ class PurchaseOrderController extends Controller
             'delivery_date' => 'nullable|date|after_or_equal:order_date',
             'store_id' => 'nullable|string|exists:stores,id',
             'status' => 'sometimes|required|string|in:pending,confirmed,received,cancelled',
+            'shipping_cost' => 'nullable|numeric|min:0',
+            'logistics_cost' => 'nullable|numeric|min:0',
             'items' => 'sometimes|required|array|min:1',
             'items.*.product_id' => 'required|string|exists:products,id',
             'items.*.variant_id' => 'nullable|string|exists:product_variants,id',
@@ -290,6 +300,8 @@ class PurchaseOrderController extends Controller
                     'currency_code',
                     'status',
                     'comments',
+                    'shipping_cost',
+                    'logistics_cost',
                 ]),
                 ['updated_by' => $user->id]
             ));
@@ -303,8 +315,8 @@ class PurchaseOrderController extends Controller
                     }
 
                     $variant = null;
-                    if ($itemData['variant_id']) {
-                        $variant = ProductVariant::where('id', $itemData['variant_id'])
+                    if (($itemData['variant_id'] ?? null)) {
+                        $variant = ProductVariant::where('id', ($itemData['variant_id'] ?? null))
                             ->where('product_id', $itemData['product_id'])
                             ->first();
                         if (!$variant) {
@@ -322,7 +334,7 @@ class PurchaseOrderController extends Controller
                         'id' => (string) Str::uuid(),
                         'purchase_order_id' => $purchaseOrder->id,
                         'product_id' => $itemData['product_id'],
-                        'variant_id' => $itemData['variant_id'],
+                        'variant_id' => ($itemData['variant_id'] ?? null),
                         'quantity' => $itemData['quantity'],
                         'received_quantity' => 0, // Initialize as 0
                         'unit_price' => $itemData['unit_price'],
@@ -394,6 +406,8 @@ class PurchaseOrderController extends Controller
             'items' => 'required|array|min:1',
             'items.*.id' => 'required|string|exists:purchase_order_items,id',
             'items.*.received_quantity' => 'required|integer|min:0',
+            'shipping_cost' => 'nullable|numeric|min:0',
+            'logistics_cost' => 'nullable|numeric|min:0',
         ]);
 
         if ($validator->fails()) {
@@ -409,6 +423,9 @@ class PurchaseOrderController extends Controller
             $user = $request->user();
             $remainingItems = [];
             $receivedItems = $request->input('items');
+            $shippingCost = (float) $request->input('shipping_cost', 0);
+            $logisticsCost = (float) $request->input('logistics_cost', 0);
+            $landedCostLines = [];
 
             foreach ($receivedItems as $receivedItem) {
                 $item = PurchaseOrderItem::where('id', $receivedItem['id'])
@@ -443,6 +460,15 @@ class PurchaseOrderController extends Controller
                     // Update received_quantity for the item
                     $item->received_quantity += (int) $receivedItem['received_quantity'];
                     $item->save();
+
+                    // Track this line for landed-cost allocation below - the cost basis
+                    // (unit_price paid) and quantity actually received in this call.
+                    $landedCostLines[] = [
+                        'product' => Product::find($item->product_id),
+                        'quantity' => (int) $receivedItem['received_quantity'],
+                        'unit_value' => (float) $item->unit_price,
+                        'unit_cost' => (float) $item->unit_price,
+                    ];
                 }
                 if ($receivedItem['received_quantity'] < $item->quantity) {
                     $remainingItems[] = [
@@ -488,7 +514,7 @@ class PurchaseOrderController extends Controller
                         'id' => (string) Str::uuid(),
                         'purchase_order_id' => $newPurchaseOrder->id,
                         'product_id' => $itemData['product_id'],
-                        'variant_id' => $itemData['variant_id'],
+                        'variant_id' => ($itemData['variant_id'] ?? null),
                         'quantity' => $itemData['quantity'],
                         'unit_price' => $itemData['unit_price'],
                         'subtotal' => $subtotal,
@@ -505,13 +531,25 @@ class PurchaseOrderController extends Controller
                 $purchaseOrder->status = 'received';
             }
             $purchaseOrder->updated_by = $user->id;
+            $purchaseOrder->shipping_cost = $shippingCost;
+            $purchaseOrder->logistics_cost = $logisticsCost;
             $purchaseOrder->save();
+
+            // Distribute the shipment's shipping/logistics cost across the products
+            // actually received in this call, updating each product's landed-cost
+            // basis (unit_cost, shipping_cost, logistics_cost).
+            $pricingWarnings = $this->landedCostService->apply($landedCostLines, $shippingCost, $logisticsCost);
 
             DB::commit();
             $response = [
                 'status' => 'success',
                 'message' => 'Purchase order received successfully.',
-                'data' => $purchaseOrder
+                // The frontend (lib/purchaseorders.ts receiptPurchaseOrder) reads
+                // `purchase_order`, not `data` - keep both so any other caller
+                // relying on `data` doesn't break.
+                'data' => $purchaseOrder,
+                'purchase_order' => $purchaseOrder,
+                'pricing_warnings' => $pricingWarnings,
             ];
             if ($newPurchaseOrder) {
                 $response['new_purchase_order'] = $newPurchaseOrder->load([

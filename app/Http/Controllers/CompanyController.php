@@ -13,9 +13,40 @@ class CompanyController extends Controller
 {
     use HandlesDatabaseErrors;
 
+    /**
+     * Serve public branding assets (logo/letterhead) with explicit CORS headers.
+     * These need to load cross-origin into <img crossorigin="anonymous"> so the
+     * frontend can render them into a canvas for PDF export without tainting it.
+     * Served through a real Laravel route (not a static public/ file) because
+     * `php artisan serve` serves existing public/ files directly, bypassing all
+     * middleware/headers entirely.
+     */
+    public function asset(string $filename)
+    {
+        if (!preg_match('/^[a-zA-Z0-9_-]+\.(png|jpg|jpeg)$/', $filename)) {
+            abort(404);
+        }
+
+        $path = storage_path('app/company-assets/' . $filename);
+        if (!is_file($path)) {
+            abort(404);
+        }
+
+        $mime = match (strtolower(pathinfo($filename, PATHINFO_EXTENSION))) {
+            'png' => 'image/png',
+            'jpg', 'jpeg' => 'image/jpeg',
+        };
+
+        return response(file_get_contents($path), 200, [
+            'Content-Type' => $mime,
+            'Cache-Control' => 'public, max-age=86400',
+            'Access-Control-Allow-Origin' => '*',
+        ]);
+    }
+
     public function __construct()
     {
-        $this->middleware('auth:sanctum');
+        $this->middleware('auth:sanctum')->except('asset');
     }
 
     protected function hasPermission(Request $request, $permission, $resourceCompanyId = null)
@@ -60,6 +91,7 @@ class CompanyController extends Controller
             'postal_code' => 'nullable|string|max:20',
             'website' => 'nullable|string|max:255',
             'logo_url' => 'nullable|string',
+            'letterhead_url' => 'nullable|string',
         ]);
 
         if ($validator->fails()) {
@@ -82,6 +114,7 @@ class CompanyController extends Controller
             'postal_code' => $request->input('postal_code'),
             'website' => $request->input('website'),
             'logo_url' => $request->input('logo_url'),
+            'letterhead_url' => $request->input('letterhead_url'),
             'is_active' => true,
             'is_first_time' => true,
             'created_at' => now(),
@@ -129,6 +162,7 @@ class CompanyController extends Controller
             'is_active' => 'sometimes|boolean',
             'is_first_time' => 'sometimes|boolean',
             'logo_url' => 'nullable|string',
+            'letterhead_url' => 'nullable|string',
         ]);
 
         if ($validator->fails()) {

@@ -47,23 +47,33 @@ body { font-family: 'Figtree'; background: #fff; }
         .etims-details { width: 72%; vertical-align: top; line-height: 1.5; }
         .etims-qr { width: 28%; text-align: right; vertical-align: top; }
         .etims-qr img { width: 118px; height: 118px; }
+        .letterhead-banner { width: 100%; display: block; margin-bottom: 24px; }
     </style>
 </head>
 <body>
     <div class="invoice-box">
+        @php $hasLetterhead = isset($invoice->company) && $invoice->company->letterhead_url; @endphp
+        @if($hasLetterhead)
+            <img src="{{ $invoice->company->letterhead_url }}" alt="{{ $invoice->company->name }}" class="letterhead-banner"/>
+        @endif
         <div class="flex-row" style="align-items: flex-start; margin-bottom: 0;">
-            <div style="display: flex; align-items: flex-start; margin-top: 0; margin-bottom: 0;">
-                @if(isset($invoice->company) && $invoice->company->logo_url)
-                    <img src="{{ $invoice->company->logo_url }}" alt="Logo" class="company-logo" style="background: none;"/>
-                @else
-                    <div class="company-logo">
-                        {{ strtoupper(substr($invoice->company->name ?? 'C', 0, 1)) }}
+            @if($hasLetterhead)
+                {{-- Company identity already shown once, in the letterhead above --}}
+                <div></div>
+            @else
+                <div style="display: flex; align-items: flex-start; margin-top: 0; margin-bottom: 0;">
+                    @if(isset($invoice->company) && $invoice->company->logo_url)
+                        <img src="{{ $invoice->company->logo_url }}" alt="Logo" class="company-logo" style="background: none;"/>
+                    @else
+                        <div class="company-logo">
+                            {{ strtoupper(substr($invoice->company->name ?? 'C', 0, 1)) }}
+                        </div>
+                    @endif
+                    <div class="company-info" style="margin-left: 12px;">
+                        <div class="company-name">{{ $invoice->company->name ?? 'Company Name' }}</div>
                     </div>
-                @endif
-                <div class="company-info" style="margin-left: 12px;">
-                    <div class="company-name">{{ $invoice->company->name ?? 'Company Name' }}</div>
                 </div>
-            </div>
+            @endif
             <div class="invoice-title" style="text-align: right; min-width: 180px; align-self: flex-start; margin-top: 0;">INVOICE</div>
         </div>
 

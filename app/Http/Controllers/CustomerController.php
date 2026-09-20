@@ -5,6 +5,8 @@ namespace App\Http\Controllers;
 use App\Models\Customer;
 use App\Models\Company;
 use App\Models\Document;
+use App\Models\Invoice;
+use App\Models\Order;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Validator;
 use Illuminate\Support\Str;
@@ -159,16 +161,43 @@ class CustomerController extends Controller
                     'last_contact_date' => 'nullable|date',
                     'customer_type' => 'nullable|string|in:individual,company',
                     'business_name' => 'nullable|string|max:255',
+                    'trading_name' => 'nullable|string|max:255',
+                    'business_type' => 'nullable|string|in:pharmacy,hospital_clinic,distributor,ngo,other',
+                    'registration_number' => 'nullable|string|max:100',
+                    'ppb_license_number' => 'nullable|string|max:100',
+                    'website' => 'nullable|string|max:255',
+                    'telephone' => 'nullable|string|max:50',
+                    'region' => 'nullable|string|max:100',
+                    'county' => 'nullable|string|max:100',
                     'nature_of_business' => 'nullable|string|max:255',
                     'pin_number' => 'nullable|string|max:100',
                     'contact_person_name' => 'nullable|string|max:255',
                     'contact_person_phone' => 'nullable|string|max:50',
                     'contact_person_email' => 'nullable|email|max:255',
+                    'accounts_contact_name' => 'nullable|string|max:255',
+                    'accounts_contact_designation' => 'nullable|string|max:255',
+                    'accounts_contact_phone' => 'nullable|string|max:50',
+                    'accounts_contact_email' => 'nullable|email|max:255',
+                    // Credit-application data a Sales Rep captures at creation time -
+                    // materialized into a real CustomerAccount on Stage 1 approval.
+                    'credit_application' => 'nullable|array',
+                    'credit_application.annual_turnover' => 'nullable|numeric|min:0',
+                    'credit_application.credit_required' => 'nullable|numeric|min:0',
+                    'credit_application.credit_period_required' => 'nullable|string|max:100',
+                    'credit_application.credit_period_pd_cheque_days' => 'nullable|integer|min:0|max:365',
+                    'credit_application.directors' => 'nullable|array',
+                    'credit_application.suppliers' => 'nullable|array',
+                    'credit_application.bank_details' => 'nullable|array',
                 ]);
                 if ($validator->fails()) {
                     DB::rollBack();
                     return response()->json(['status' => 'failed', 'errors' => $validator->errors()], 422);
                 }
+
+                // A Sales Rep creating a customer starts a two-stage credit-approval
+                // workflow (see CustomerApprovalController); anyone else creating a
+                // customer keeps today's behavior of being immediately usable.
+                $isRepCreated = (bool) ($user->role->is_sales_rep ?? false);
 
                 // Create customer
                 $customer = Customer::create([
@@ -179,26 +208,51 @@ class CustomerController extends Controller
                     'email' => $customerData['email'] ?? null,
                     'phone' => $this->formatPhoneNumber($customerData['phone'] ?? null),
                     'status' => $customerData['status'] ?? 'active',
-                    'payment_method' => $customerData['payment_method'] ?? null,
+                    'approval_status' => $isRepCreated ? 'pending_stage1' : 'approved',
+                    'payment_method' => $customerData['payment_method'] ?? 'cash',
                     'address' => $customerData['address'] ?? null,
                     'city' => $customerData['city'] ?? null,
                     'state' => $customerData['state'] ?? null,
-                    'country' => $customerData['country'] ?? null,
+                    'country' => $customerData['country'] ?? 'Kenya',
                     'postal_code' => $customerData['postal_code'] ?? null,
+                    'region' => $customerData['region'] ?? null,
+                    'county' => $customerData['county'] ?? null,
                     'notes' => $customerData['notes'] ?? null,
                     'tags' => $customerData['tags'] ?? [],
                     'preferred_communication_channel' => $customerData['preferred_communication_channel'] ?? null,
                     'last_contact_date' => $customerData['last_contact_date'] ?? null,
                     'customer_type' => $customerData['customer_type'] ?? null,
                     'business_name' => $customerData['business_name'] ?? null,
+                    'trading_name' => $customerData['trading_name'] ?? null,
+                    'business_type' => $customerData['business_type'] ?? null,
+                    'registration_number' => $customerData['registration_number'] ?? null,
+                    'ppb_license_number' => $customerData['ppb_license_number'] ?? null,
+                    'website' => $customerData['website'] ?? null,
+                    'telephone' => $customerData['telephone'] ?? null,
                     'nature_of_business' => $customerData['nature_of_business'] ?? null,
                     'pin_number' => $customerData['pin_number'] ?? null,
                     'contact_person_name' => $customerData['contact_person_name'] ?? null,
                     'contact_person_phone' => $customerData['contact_person_phone'] ?? null,
                     'contact_person_email' => $customerData['contact_person_email'] ?? null,
+                    'accounts_contact_name' => $customerData['accounts_contact_name'] ?? null,
+                    'accounts_contact_designation' => $customerData['accounts_contact_designation'] ?? null,
+                    'accounts_contact_phone' => $customerData['accounts_contact_phone'] ?? null,
+                    'accounts_contact_email' => $customerData['accounts_contact_email'] ?? null,
+                    'pending_credit_application' => $isRepCreated ? ($customerData['credit_application'] ?? []) : null,
                     'timestamp' => $customerData['timestamp'] ?? null,
                     'created_by' => $user->id,
                 ]);
+
+                if ($isRepCreated) {
+                    \App\Models\CustomerApproval::create([
+                        'id' => (string) Str::uuid(),
+                        'customer_id' => $customer->id,
+                        'approval_type' => 'stage1',
+                        'status' => 'pending',
+                        'company_id' => $companyId,
+                        'created_by' => $user->id,
+                    ]);
+                }
 
                 $results[] = $customer;
             }
@@ -246,6 +300,18 @@ class CustomerController extends Controller
             'preferred_communication_channel' => 'nullable|string|in:email,phone,sms,none',
             'last_contact_date' => 'nullable|date',
             'customer_type' => 'nullable|string|in:individual,company',
+            'trading_name' => 'nullable|string|max:255',
+            'business_type' => 'nullable|string|in:pharmacy,hospital_clinic,distributor,ngo,other',
+            'registration_number' => 'nullable|string|max:100',
+            'ppb_license_number' => 'nullable|string|max:100',
+            'website' => 'nullable|string|max:255',
+            'telephone' => 'nullable|string|max:50',
+            'region' => 'nullable|string|max:100',
+            'county' => 'nullable|string|max:100',
+            'accounts_contact_name' => 'nullable|string|max:255',
+            'accounts_contact_designation' => 'nullable|string|max:255',
+            'accounts_contact_phone' => 'nullable|string|max:50',
+            'accounts_contact_email' => 'nullable|email|max:255',
         ]);
 
         if ($validator->fails()) {
@@ -297,8 +363,20 @@ class CustomerController extends Controller
                 'contact_person_phone' => $request->input('contact_person_phone', $customer->contact_person_phone),
                 'contact_person_email' => $request->input('contact_person_email', $customer->contact_person_email),
                 'business_name' => $request->input('business_name', $customer->business_name),
+                'trading_name' => $request->input('trading_name', $customer->trading_name),
+                'business_type' => $request->input('business_type', $customer->business_type),
+                'registration_number' => $request->input('registration_number', $customer->registration_number),
+                'ppb_license_number' => $request->input('ppb_license_number', $customer->ppb_license_number),
+                'website' => $request->input('website', $customer->website),
+                'telephone' => $request->input('telephone', $customer->telephone),
+                'region' => $request->input('region', $customer->region),
+                'county' => $request->input('county', $customer->county),
                 'nature_of_business' => $request->input('nature_of_business', $customer->nature_of_business),
                 'pin_number' => $request->input('pin_number', $customer->pin_number),
+                'accounts_contact_name' => $request->input('accounts_contact_name', $customer->accounts_contact_name),
+                'accounts_contact_designation' => $request->input('accounts_contact_designation', $customer->accounts_contact_designation),
+                'accounts_contact_phone' => $request->input('accounts_contact_phone', $customer->accounts_contact_phone),
+                'accounts_contact_email' => $request->input('accounts_contact_email', $customer->accounts_contact_email),
                 'timestamp' => $request->input('timestamp', $customer->timestamp),
             ])->save();
 
@@ -328,9 +406,32 @@ class CustomerController extends Controller
             ], 403);
         }
 
-        $customers = Customer::where('company_id', $user->company_id)
-            ->orderBy('name')
-            ->get();
+        $query = Customer::where('company_id', $user->company_id);
+
+        // A customer created by a Sales Rep is locked out of search/pickers
+        // everywhere (including POS) until it clears both approval stages.
+        // Only someone who can actually approve customers may opt into seeing
+        // pending applications (e.g. the approvals management screen).
+        $includePending = $request->boolean('include_pending')
+            && $this->hasPermission($request, 'can_approve_account', $user->company_id);
+        if (!$includePending) {
+            $query->where('approval_status', 'approved');
+        }
+
+        if ($request->filled('search')) {
+            $term = $request->input('search');
+            $query->where(function ($q) use ($term) {
+                $q->where('name', 'ilike', "%{$term}%")
+                    ->orWhere('business_name', 'ilike', "%{$term}%")
+                    ->orWhere('email', 'ilike', "%{$term}%")
+                    ->orWhere('phone', 'ilike', "%{$term}%")
+                    ->orWhere('city', 'ilike', "%{$term}%")
+                    ->orWhere('address', 'ilike', "%{$term}%")
+                    ->orWhere('customer_number', 'ilike', "%{$term}%");
+            });
+        }
+
+        $customers = $query->orderBy('name')->get();
 
         return response()->json([
             'status' => 'success',
@@ -400,6 +501,65 @@ class CustomerController extends Controller
                 'message' => 'Failed to retrieve customer profile: ' . $e->getMessage(),
             ], 500);
         }
+    }
+
+    /**
+     * Lightweight credit-terms summary for a customer, used when creating an
+     * invoice on credit so staff can see the GM-approved terms already on file
+     * (rather than guessing/re-entering them).
+     */
+    public function creditTerms(Request $request, $customerId)
+    {
+        $user = $request->user();
+        $customer = Customer::where('id', $customerId)
+            ->where('company_id', $user->company_id)
+            ->with('account:id,customer_id,credit_required,credit_days,credit_terms,pending_credit_limit,pending_credit_days')
+            ->first();
+
+        if (!$customer) {
+            return response()->json(['status' => 'failed', 'message' => 'Customer not found.'], 404);
+        }
+
+        $creditRequired = $customer->account->credit_required ?? null;
+        $creditUsed = 0.0;
+        $availableCredit = null;
+
+        if ($creditRequired !== null) {
+            // Outstanding balance on this customer's credit invoices...
+            $creditUsed = (float) Invoice::where('customer_id', $customerId)
+                ->where('company_id', $user->company_id)
+                ->where('payment_type', 'credit')
+                ->whereNotIn('status', ['cancelled'])
+                ->sum('balance_amount');
+
+            // ...plus credit orders not yet invoiced (so credit is reserved the moment
+            // it's accepted on an order, not just once it becomes an invoice).
+            $creditUsed += Order::where('customer_id', $customerId)
+                ->where('company_id', $user->company_id)
+                ->where('payment_type', 'credit')
+                ->where('payment_status', '!=', 'paid')
+                ->whereDoesntHave('invoice')
+                ->get()
+                ->sum(fn ($order) => max(0, (float) $order->final_amount - (float) $order->amount_paid));
+
+            $availableCredit = max(0, (float) $creditRequired - $creditUsed);
+        }
+
+        return response()->json([
+            'status' => 'success',
+            'data' => [
+                'payment_method' => $customer->payment_method,
+                'credit_required' => $creditRequired,
+                'credit_used' => $creditUsed,
+                'available_credit' => $availableCredit,
+                'credit_days' => $customer->account->credit_days ?? null,
+                'credit_terms' => $customer->account->credit_terms ?? null,
+                'has_pending_change' => $customer->account
+                    ? (!is_null($customer->account->pending_credit_limit) || !is_null($customer->account->pending_credit_days))
+                    : false,
+                'customer_account_id' => $customer->account->id ?? null,
+            ],
+        ]);
     }
 
     public function destroy(Request $request, $customerId)
