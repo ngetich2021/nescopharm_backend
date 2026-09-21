@@ -48,7 +48,11 @@ class CustomerAccountController extends Controller
     public function index(Request $request)
     {
         $user = $request->user();
-        if (!$this->hasPermission($request, 'can_view_accounts', $user->company_id)) {
+        // A customer account is just the credit/payment side of a customer
+        // record - anyone authorised to view customers must see it too, not
+        // just holders of the separate can_view_accounts permission.
+        if (!$this->hasPermission($request, 'can_view_accounts', $user->company_id)
+            && !$this->hasPermission($request, 'can_view_customers', $user->company_id)) {
             return response()->json([
                 'status' => 'failed',
                 'message' => 'Unauthorized to view accounts.',
@@ -80,7 +84,10 @@ class CustomerAccountController extends Controller
     public function show(Request $request, $id)
     {
         $user = $request->user();
-        if (!$this->hasPermission($request, 'can_view_accounts', $user->company_id)) {
+        // Same reasoning as index(): viewing a customer must never gatekeep
+        // the credit/payment details captured for that same customer.
+        if (!$this->hasPermission($request, 'can_view_accounts', $user->company_id)
+            && !$this->hasPermission($request, 'can_view_customers', $user->company_id)) {
             return response()->json([
                 'status' => 'failed',
                 'message' => 'Unauthorized to view this account.'
@@ -128,6 +135,7 @@ class CustomerAccountController extends Controller
     $validator = Validator::make($request->all(), [
             'customer_id' => 'required|uuid|exists:customers,id',
             'certificate_of_incorporation_number' => 'nullable|string|max:100',
+            'company_type' => 'nullable|string|max:100',
             'annual_turnover' => 'nullable|numeric|min:0',
             'credit_required' => 'nullable|numeric|min:0',
             'credit_period_required' => 'nullable|string|max:100',
@@ -138,7 +146,10 @@ class CustomerAccountController extends Controller
             'notes' => 'nullable|string',
             'directors' => 'nullable|array',
             'directors.*.name' => 'required_with:directors|string|max:255',
-            'directors.*.id_passport_number' => 'required_with:directors|string|max:100',
+            // ID/passport number is genuinely not always on hand when this
+            // form is captured - it must not block saving everything else
+            // (bank details, credit terms, suppliers) that was filled in.
+            'directors.*.id_passport_number' => 'nullable|string|max:100',
             'directors.*.pin' => 'nullable|string|max:100',
             'directors.*.phone_number' => 'nullable|string|max:50',
             'authorised_purchase_persons' => 'nullable|array',
@@ -179,6 +190,7 @@ class CustomerAccountController extends Controller
                 $user->id,
                 $request->only([
                     'certificate_of_incorporation_number',
+                    'company_type',
                     'annual_turnover',
                     'credit_required',
                     'credit_period_required',
@@ -255,6 +267,7 @@ class CustomerAccountController extends Controller
             'account_number' => 'sometimes|required|string|unique:customer_accounts,account_number,' . $id . ',id',
             'nature_of_business' => 'nullable|string|max:255',
             'certificate_of_incorporation_number' => 'nullable|string|max:100',
+            'company_type' => 'nullable|string|max:100',
             'pin_number' => 'nullable|string|max:100',
             'annual_turnover' => 'nullable|numeric|min:0',
             'credit_required' => 'nullable|numeric|min:0',
@@ -291,6 +304,7 @@ class CustomerAccountController extends Controller
             $account->forceFill([
                 'account_number' => $request->input('account_number', $account->account_number),
                 'certificate_of_incorporation_number' => $request->input('certificate_of_incorporation_number', $account->certificate_of_incorporation_number),
+                'company_type' => $request->input('company_type', $account->company_type),
                 'annual_turnover' => $request->input('annual_turnover', $account->annual_turnover),
                 'credit_required' => $request->input('credit_required', $account->credit_required),
                 'credit_period_required' => $request->input('credit_period_required', $account->credit_period_required),
@@ -311,7 +325,7 @@ class CustomerAccountController extends Controller
                         'id' => (string) Str::uuid(),
                         'customer_account_id' => $account->id,
                         'name' => $director['name'],
-                        'id_passport_number' => $director['id_passport_number'],
+                        'id_passport_number' => $director['id_passport_number'] ?? null,
                         'pin' => $director['pin'] ?? null,
                         'phone_number' => $director['phone_number'] ?? null,
                     ]);

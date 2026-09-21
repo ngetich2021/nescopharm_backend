@@ -273,6 +273,90 @@ class InventoryBatch extends Model
     }
 
     /**
+     * Deduct straight from available -> sold, skipping the "allocated" hold
+     * step. Orders in this system consume stock immediately at creation
+     * time (there is no separate reserve-then-fulfil lifecycle), so this
+     * mirrors that: a single movement, not allocate() followed by sell().
+     */
+    public function sellFromAvailable($quantity, array $reference = [], $notes = null)
+    {
+        if ($quantity <= 0 || $this->quantity_available < $quantity) {
+            return false;
+        }
+
+        $before = $this->quantity_available;
+        $this->quantity_available -= $quantity;
+        $this->quantity_sold += $quantity;
+        $this->save();
+        $this->updateStatus();
+
+        $this->movements()->create([
+            'id' => (string) Str::uuid(),
+            'company_id' => $this->company_id,
+            'store_id' => $this->store_id,
+            'product_id' => $this->product_id,
+            'variant_id' => $this->variant_id,
+            'type' => 'sale',
+            'quantity' => -$quantity,
+            'quantity_before' => $before,
+            'quantity_after' => $this->quantity_available,
+            'unit_cost' => $this->unit_cost,
+            'unit_price' => $this->selling_price,
+            'total_value' => $quantity * ($this->selling_price ?? 0),
+            'reference_type' => $reference['reference_type'] ?? null,
+            'reference_id' => $reference['reference_id'] ?? null,
+            'reference_number' => $reference['reference_number'] ?? null,
+            'notes' => $notes,
+        ]);
+
+        return true;
+    }
+
+    /**
+     * Reverse a sellFromAvailable() - used when an order line that consumed
+     * this batch is edited or deleted, so the batch isn't left permanently
+     * short.
+     */
+    public function restoreFromSale($quantity, array $reference = [], $notes = null)
+    {
+        if ($quantity <= 0) {
+            return false;
+        }
+
+        $quantity = min($quantity, $this->quantity_sold);
+        if ($quantity <= 0) {
+            return false;
+        }
+
+        $before = $this->quantity_available;
+        $this->quantity_available += $quantity;
+        $this->quantity_sold -= $quantity;
+        $this->save();
+        $this->updateStatus();
+
+        $this->movements()->create([
+            'id' => (string) Str::uuid(),
+            'company_id' => $this->company_id,
+            'store_id' => $this->store_id,
+            'product_id' => $this->product_id,
+            'variant_id' => $this->variant_id,
+            'type' => 'return',
+            'quantity' => $quantity,
+            'quantity_before' => $before,
+            'quantity_after' => $this->quantity_available,
+            'unit_cost' => $this->unit_cost,
+            'unit_price' => $this->selling_price,
+            'total_value' => $quantity * ($this->selling_price ?? 0),
+            'reference_type' => $reference['reference_type'] ?? null,
+            'reference_id' => $reference['reference_id'] ?? null,
+            'reference_number' => $reference['reference_number'] ?? null,
+            'notes' => $notes ?? 'Order edited/cancelled - batch stock restored',
+        ]);
+
+        return true;
+    }
+
+    /**
      * Generate unique batch number
      */
     public static function generateBatchNumber($companyId, $productId)

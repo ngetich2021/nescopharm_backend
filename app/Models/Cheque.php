@@ -17,8 +17,12 @@ class Cheque extends Model
     protected $fillable = [
         'id',
         'company_id',
+        'direction',
         'customer_id',
+        'supplier_id',
+        'payee_name',
         'invoice_id',
+        'purchase_order_id',
         'payment_id',
         'cheque_number',
         'bank_name',
@@ -31,6 +35,7 @@ class Cheque extends Model
         'created_by',
         'approved_by',
         'approved_at',
+        'reminder_sent_at',
     ];
 
     protected $casts = [
@@ -38,11 +43,22 @@ class Cheque extends Model
         'issue_date' => 'date',
         'maturity_date' => 'date',
         'approved_at' => 'datetime',
+        'reminder_sent_at' => 'datetime',
         'created_at' => 'datetime',
         'updated_at' => 'datetime',
     ];
 
-    protected $appends = ['attachment_url'];
+    protected $appends = ['attachment_url', 'payee_display_name'];
+
+    /**
+     * Who an issued cheque is actually paying - the linked supplier or
+     * customer if there is one, otherwise the free-text payee (office
+     * supplies vendor, logistics company, etc. with no master record).
+     */
+    public function getPayeeDisplayNameAttribute(): ?string
+    {
+        return $this->supplier?->name ?? $this->customer?->name ?? $this->payee_name;
+    }
 
     public function getAttachmentUrlAttribute(): ?string
     {
@@ -78,9 +94,29 @@ class Cheque extends Model
         return $this->belongsTo(Customer::class);
     }
 
+    public function supplier()
+    {
+        return $this->belongsTo(Supplier::class);
+    }
+
     public function invoice()
     {
         return $this->belongsTo(Invoice::class);
+    }
+
+    public function purchaseOrder()
+    {
+        return $this->belongsTo(PurchaseOrder::class);
+    }
+
+    public function scopeReceived($query)
+    {
+        return $query->where('direction', 'received');
+    }
+
+    public function scopeIssued($query)
+    {
+        return $query->where('direction', 'issued');
     }
 
     public function payment()

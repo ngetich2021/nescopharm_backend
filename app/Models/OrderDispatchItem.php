@@ -27,6 +27,7 @@ class OrderDispatchItem extends Model
         'unit_quantity',
         'base_quantity',
         'packaging_breakdown',
+        'batch_allocations',
         'packaging_notes',
         'delivered_quantity',
         'damaged_quantity',
@@ -35,6 +36,7 @@ class OrderDispatchItem extends Model
 
     protected $casts = [
         'packaging_breakdown' => 'array',
+        'batch_allocations' => 'array',
         'quantity' => 'integer',
         'delivered_quantity' => 'integer',
         'damaged_quantity' => 'integer',

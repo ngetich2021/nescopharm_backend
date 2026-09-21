@@ -244,14 +244,24 @@ class LogisticController extends Controller
             'recipient_name' => 'sometimes|string|max:255',
             'recipient_phone' => 'sometimes|string|max:50',
             'delivery_address' => 'sometimes|string',
+            'delivery_location' => 'sometimes|string|max:255',
             'city' => 'sometimes|string|max:100',
             'state' => 'sometimes|string|max:100',
+            'region' => 'sometimes|string|max:100',
             'country' => 'sometimes|string|max:100',
             'estimated_delivery_time' => 'sometimes|date',
             'actual_delivery_time' => 'sometimes|date',
             'signature' => 'sometimes',
             'notes' => 'sometimes|string',
             'update_order_status' => 'sometimes|boolean',
+            'delivery_cost' => 'sometimes|numeric|min:0',
+            'amount_paid' => 'sometimes|numeric|min:0',
+            'payment_method' => 'sometimes|string|max:100',
+            'payment_reference' => 'sometimes|string|max:255',
+            'payment_date' => 'sometimes|date',
+            'cheque_number' => 'sometimes|string|max:100',
+            'bank_name' => 'sometimes|string|max:150',
+            'cheque_maturity_date' => 'sometimes|date',
         ]);
 
         if ($validator->fails()) {
@@ -263,7 +273,14 @@ class LogisticController extends Controller
 
         try {
             return DB::transaction(function () use ($request, $logistic) {
-                $logistic->update($request->except(['update_order_status']));
+                $updates = $request->except(['update_order_status']);
+                if ($request->has('delivery_cost') || $request->has('amount_paid')) {
+                    $updates['payment_status'] = $this->resolvePaymentStatus(
+                        $request->input('delivery_cost', $logistic->delivery_cost),
+                        $request->input('amount_paid', $logistic->amount_paid)
+                    );
+                }
+                $logistic->update($updates);
 
                 // Update order status if requested
                 if ($request->input('update_order_status', false)) {
@@ -330,12 +347,24 @@ class LogisticController extends Controller
             'recipient_name' => 'nullable|string|max:255',
             'recipient_phone' => 'nullable|string|max:50',
             'delivery_address' => 'nullable|string',
+            'delivery_location' => 'nullable|string|max:255',
             'city' => 'nullable|string|max:100',
             'state' => 'nullable|string|max:100',
+            'region' => 'nullable|string|max:100',
             'country' => 'nullable|string|max:100',
             'estimated_delivery_time' => 'nullable|date',
             'notes' => 'nullable|string',
             'update_order_status' => 'sometimes|boolean',
+            // What was paid to the delivery/logistics provider for this
+            // dispatch - distinct from the customer's payment for the goods.
+            'delivery_cost' => 'nullable|numeric|min:0',
+            'amount_paid' => 'nullable|numeric|min:0',
+            'payment_method' => 'nullable|string|max:100',
+            'payment_reference' => 'nullable|string|max:255',
+            'payment_date' => 'nullable|date',
+            'cheque_number' => 'nullable|string|max:100',
+            'bank_name' => 'nullable|string|max:150',
+            'cheque_maturity_date' => 'nullable|date',
         ]);
 
         if ($validator->fails()) {
@@ -380,12 +409,23 @@ class LogisticController extends Controller
                     'recipient_name' => $request->input('recipient_name'),
                     'recipient_phone' => $request->input('recipient_phone'),
                     'delivery_address' => $request->input('delivery_address'),
+                    'delivery_location' => $request->input('delivery_location'),
                     'city' => $request->input('city'),
                     'state' => $request->input('state'),
-                    'country' => $request->input('country'),
+                    'region' => $request->input('region'),
+                    'country' => $request->input('country', 'Kenya'),
                     'dispatch_time' => now(),
                     'estimated_delivery_time' => $request->input('estimated_delivery_time'),
                     'notes' => $request->input('notes'),
+                    'delivery_cost' => $request->input('delivery_cost'),
+                    'amount_paid' => $request->input('amount_paid'),
+                    'payment_method' => $request->input('payment_method'),
+                    'payment_reference' => $request->input('payment_reference'),
+                    'payment_date' => $request->input('payment_date'),
+                    'cheque_number' => $request->input('cheque_number'),
+                    'bank_name' => $request->input('bank_name'),
+                    'cheque_maturity_date' => $request->input('cheque_maturity_date'),
+                    'payment_status' => $this->resolvePaymentStatus($request->input('delivery_cost'), $request->input('amount_paid')),
                 ]);
 
                 // Update order status if requested and order exists
@@ -429,5 +469,24 @@ class LogisticController extends Controller
                 'message' => 'Failed to create logistics record: ' . $e->getMessage(),
             ], 500);
         }
+    }
+
+    /**
+     * Derive the delivery payment status from what's owed vs what's paid.
+     */
+    protected function resolvePaymentStatus($deliveryCost, $amountPaid): string
+    {
+        $cost = $deliveryCost !== null ? (float) $deliveryCost : null;
+        $paid = (float) ($amountPaid ?? 0);
+
+        if ($cost === null || $cost <= 0) {
+            return $paid > 0 ? 'paid' : 'unpaid';
+        }
+
+        if ($paid <= 0) {
+            return 'unpaid';
+        }
+
+        return $paid >= $cost ? 'paid' : 'partial';
     }
 }

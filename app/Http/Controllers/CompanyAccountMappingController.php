@@ -400,16 +400,26 @@ class CompanyAccountMappingController extends Controller
 
         $result = CompanyAccountMapping::validateConfiguration($companyId);
 
-        // Enhance missing mappings with action items
+        // Enhance missing mappings with action items. validateConfiguration()
+        // returns the list under 'issues', not 'missing' - reading the wrong
+        // key here meant missing_mappings was silently always empty, even
+        // though configured_count/required_count showed the real gap.
         $enhancedMissing = array_map(function($item) {
             return array_merge($item, [
                 'action_required' => true,
                 'action' => "Configure mapping for '{$item['key']}'",
                 'link' => "/admin/accounting/mappings/configure/{$item['key']}",
             ]);
-        }, $result['missing'] ?? []);
+        }, $result['issues'] ?? []);
 
-        $httpStatus = $result['is_valid'] ? 200 : 422;
+        // This is a read/status endpoint, not a mutation - "mappings are
+        // incomplete" is a normal, expected answer (is_valid: false in the
+        // body already conveys it), not a failed request. Returning 422
+        // here made every caller's apiCall() throw instead of receiving the
+        // structured result, which broke the account-mappings settings page
+        // (it could never actually show what was missing) and spammed the
+        // console with "errors" for an entirely normal, common state.
+        $httpStatus = 200;
 
         return response()->json([
             'status' => $result['is_valid'] ? 'success' : 'incomplete',

@@ -509,6 +509,66 @@ class Product extends Model
     }
 
     /**
+     * Get FEFO batches for allocation (First-Expiry, First-Out) - batches
+     * with no expiry date sort last, since they're not at risk of expiring.
+     */
+    public function getFEFOBatches()
+    {
+        return $this->availableBatches()
+            ->orderByRaw('expiry_date IS NULL, expiry_date ASC')
+            ->orderBy('received_date', 'asc');
+    }
+
+    /**
+     * Allocate and immediately consume stock using FEFO (First-Expiry,
+     * First-Out) - the batch soonest to expire is drawn down first. Unlike
+     * allocateStockFIFO()/InventoryBatch::allocateQuantity(), this sells
+     * straight from available stock (no separate reservation step), to
+     * match how orders in this app consume stock immediately at creation.
+     */
+    public function allocateStockFEFO($requestedQuantity, $options = [])
+    {
+        $allocations = [];
+        $remainingQuantity = $requestedQuantity;
+
+        $batches = $this->getFEFOBatches()->get();
+
+        foreach ($batches as $batch) {
+            if ($remainingQuantity <= 0) {
+                break;
+            }
+
+            $toSellFromBatch = min($remainingQuantity, $batch->quantity_available);
+
+            if ($toSellFromBatch > 0) {
+                $sold = $batch->sellFromAvailable($toSellFromBatch, [
+                    'reference_type' => $options['reference_type'] ?? null,
+                    'reference_id' => $options['reference_id'] ?? null,
+                    'reference_number' => $options['reference_number'] ?? null,
+                ], $options['notes'] ?? null);
+
+                if ($sold) {
+                    $allocations[] = [
+                        'batch_id' => $batch->id,
+                        'batch_number' => $batch->batch_number,
+                        'quantity' => $toSellFromBatch,
+                        'expiry_date' => $batch->expiry_date?->toDateString(),
+                    ];
+
+                    $remainingQuantity -= $toSellFromBatch;
+                }
+            }
+        }
+
+        return [
+            'success' => $remainingQuantity == 0,
+            'allocated_quantity' => $requestedQuantity - $remainingQuantity,
+            'remaining_quantity' => $remainingQuantity,
+            'allocations' => $allocations,
+        ];
+    }
+
+    /**
      * Allocate stock using FIFO method
      */
     public function allocateStockFIFO($requestedQuantity, $options = [])

@@ -252,6 +252,11 @@ class ProductReceiptController extends Controller
                 'items.*.manufacture_date' => 'nullable|date',
                 'items.*.supplier' => 'nullable|string',
                 'items.*.supplier_id' => 'nullable|uuid',
+                'items.*.serial_numbers' => 'nullable|array',
+                'items.*.serial_numbers.*' => 'string',
+                'items.*.track_serials' => 'nullable|boolean',
+                'items.*.serial_prefix' => 'nullable|string|max:20',
+                'items.*.warranty_months' => 'nullable|integer|min:0',
             ]);
             if ($validator->fails()) {
                 DB::rollBack();
@@ -376,6 +381,7 @@ class ProductReceiptController extends Controller
                         if (!empty($serialNumbers)) {
                             // Validate that serial count matches quantity
                             if (count($serialNumbers) != $item['quantity']) {
+                                DB::rollBack();
                                 return response()->json([
                                     'status' => 'failed',
                                     'message' => "Product '{$product->name}': Serial numbers count (" . count($serialNumbers) . ") must match quantity ({$item['quantity']})",
@@ -385,6 +391,7 @@ class ProductReceiptController extends Controller
                             // Check for duplicate serial numbers in this batch
                             $duplicates = array_diff_assoc($serialNumbers, array_unique($serialNumbers));
                             if (!empty($duplicates)) {
+                                DB::rollBack();
                                 return response()->json([
                                     'status' => 'failed',
                                     'message' => "Product '{$product->name}': Duplicate serial numbers found: " . implode(', ', $duplicates),
@@ -398,6 +405,7 @@ class ProductReceiptController extends Controller
                                 ->toArray();
 
                             if (!empty($existingSerials)) {
+                                DB::rollBack();
                                 return response()->json([
                                     'status' => 'failed',
                                     'message' => "Product '{$product->name}': Serial numbers already exist: " . implode(', ', $existingSerials),
@@ -583,6 +591,11 @@ class ProductReceiptController extends Controller
                     'items.*.manufacture_date' => 'nullable|date',
                     'items.*.supplier' => 'nullable|string',
                     'items.*.supplier_id' => 'nullable|uuid',
+                    'items.*.serial_numbers' => 'nullable|array',
+                    'items.*.serial_numbers.*' => 'string',
+                    'items.*.track_serials' => 'nullable|boolean',
+                    'items.*.serial_prefix' => 'nullable|string|max:20',
+                    'items.*.warranty_months' => 'nullable|integer|min:0',
                 ]);
                 if ($validator->fails()) {
                     DB::rollBack();
@@ -689,6 +702,7 @@ class ProductReceiptController extends Controller
                         if (!empty($serialNumbers)) {
                             // Validate that serial count matches quantity
                             if (count($serialNumbers) != $item['quantity']) {
+                                DB::rollBack();
                                 return response()->json([
                                     'status' => 'failed',
                                     'message' => "Product '{$product->name}': Serial numbers count (" . count($serialNumbers) . ") must match quantity ({$item['quantity']})",
@@ -698,6 +712,7 @@ class ProductReceiptController extends Controller
                             // Check for duplicate serial numbers in this batch
                             $duplicates = array_diff_assoc($serialNumbers, array_unique($serialNumbers));
                             if (!empty($duplicates)) {
+                                DB::rollBack();
                                 return response()->json([
                                     'status' => 'failed',
                                     'message' => "Product '{$product->name}': Duplicate serial numbers found: " . implode(', ', $duplicates),
@@ -712,6 +727,7 @@ class ProductReceiptController extends Controller
                                 ->toArray();
 
                             if (!empty($existingSerials)) {
+                                DB::rollBack();
                                 return response()->json([
                                     'status' => 'failed',
                                     'message' => "Product '{$product->name}': Serial numbers already exist: " . implode(', ', $existingSerials),

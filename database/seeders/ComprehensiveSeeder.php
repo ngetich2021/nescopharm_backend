@@ -129,7 +129,7 @@ class ComprehensiveSeeder extends Seeder
         'can_view_requisitions', 'can_create_requisitions', 'can_update_requisitions', 'can_delete_requisitions',
         'can_approve_requisitions', 'can_acknowledge_requisitions', 'can_manage_all_requisitions',
         // Stock Adjustments
-        'can_approve_adjustments',
+        'can_approve_adjustments', 'can_adjust_closing_stock',
         // Workflows & Approvals
         'can_view_workflows', 'can_create_workflows', 'can_edit_workflows', 'can_delete_workflows',
         'can_view_approvals', 'can_cancel_workflows', 'can_view_workflow_reports',
@@ -181,6 +181,10 @@ class ComprehensiveSeeder extends Seeder
         $warehouseRole = Role::firstOrCreate(['name' => 'Warehouse Staff', 'company_id' => $cid], ['description' => 'Handles inventory and dispatch']);
         $financeRole = Role::firstOrCreate(['name' => 'Finance Officer', 'company_id' => $cid], ['description' => 'Handles finance and accounting']);
         $hrRole = Role::firstOrCreate(['name' => 'HR Manager', 'company_id' => $cid], ['description' => 'Manages employees and payroll']);
+        $directorRole = Role::firstOrCreate(['name' => 'Director', 'company_id' => $cid], ['description' => 'Company director - full oversight, including closing-stock adjustments']);
+
+        // Director: full company access, same as Super Admin.
+        foreach ($permIds as $permId) { $directorRole->permissions()->syncWithoutDetaching([$permId => ['granted_at' => $now]]); }
 
         // Sales Manager permissions
         $salesPerms = ['can_view_dashboard', 'can_view_orders', 'can_create_orders', 'can_update_orders', 'can_view_quotes', 'can_create_quotes', 'can_update_quotes', 'can_view_customers', 'can_create_customers', 'can_update_customers', 'can_view_products', 'can_view_invoices', 'can_create_invoices', 'can_view_payments', 'can_create_payments', 'can_view_delivery_locations', 'can_view_reports', 'can_view_dispatches', 'can_create_dispatches'];

@@ -230,6 +230,14 @@ class StockAdjustmentController extends Controller
                 ], 422);
             }
 
+            // A 'set' line directly declares the closing stock quantity for
+            // that item - restrict that to director-level credentials.
+            $hasClosingStockLine = collect($request->input('items', []))
+                ->contains(fn ($item) => ($item['adjustment_type'] ?? null) === 'set');
+            if ($hasClosingStockLine && !$this->hasPermission($request, 'can_adjust_closing_stock', $companyId)) {
+                return response()->json(['message' => 'Only director-level users can set closing stock quantities'], 403);
+            }
+
             DB::beginTransaction();
 
             // Create the parent stock adjustment record
@@ -493,6 +501,13 @@ class StockAdjustmentController extends Controller
                 ], 422);
             }
 
+            // A 'set' adjustment directly declares the closing stock quantity
+            // (rather than incrementing/decrementing it) - restrict that to
+            // director-level credentials specifically.
+            if ($request->adjustment_type === 'set' && !$this->hasPermission($request, 'can_adjust_closing_stock', $companyId)) {
+                return response()->json(['message' => 'Only director-level users can set closing stock quantities'], 403);
+            }
+
             DB::beginTransaction();
 
             // Verify product belongs to company
@@ -652,6 +667,13 @@ class StockAdjustmentController extends Controller
                     'status' => 'failed',
                     'message' => $validator->errors(), 'errors' => $validator->errors()
                 ], 422);
+            }
+
+            // A 'set' adjustment directly declares the closing stock quantity
+            // - restrict that to director-level credentials.
+            $effectiveType = $request->input('adjustment_type', $adjustment->adjustment_type);
+            if ($effectiveType === 'set' && !$this->hasPermission($request, 'can_adjust_closing_stock', $companyId)) {
+                return response()->json(['message' => 'Only director-level users can set closing stock quantities'], 403);
             }
 
             DB::beginTransaction();

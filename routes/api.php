@@ -269,6 +269,7 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::patch('/update_customer/{customerId}', [CustomerController::class, 'update']);
     Route::match(['patch', 'put'], '/customers/{customerId}', [CustomerController::class, 'update'])->name('customers.update');
     Route::get('/customers/{customer_id}/profile', [CustomerController::class, 'showProfile'])->name('customers.profile');
+    Route::get('/customers/{customer_id}/statement', [CustomerController::class, 'statement'])->name('customers.statement');
     Route::get('/customers/{customerId}/credit-terms', [CustomerController::class, 'creditTerms'])->name('customers.credit-terms');
     Route::delete('/customers/{customerId}', [CustomerController::class, 'destroy'])->name('customers.destroy');
 
@@ -755,6 +756,14 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::post('/{sopId}/comments', [SopCommentController::class, 'store']);
         Route::delete('/{sopId}/comments/{commentId}', [SopCommentController::class, 'destroy']);
     });
+
+    // Daily temperature record charts - a sub-feature of SOPs/compliance.
+    Route::prefix('temperature-logs')->group(function () {
+        Route::get('/', [App\Http\Controllers\TemperatureLogController::class, 'index']);
+        Route::post('/', [App\Http\Controllers\TemperatureLogController::class, 'store']);
+        Route::match(['patch', 'put'], '/{id}', [App\Http\Controllers\TemperatureLogController::class, 'update']);
+        Route::delete('/{id}', [App\Http\Controllers\TemperatureLogController::class, 'destroy']);
+    });
 });
 
 // Finance & Accounting Routes
@@ -942,6 +951,11 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::post('cheques/{id}/approve', [ChequeController::class, 'approve']);
     Route::post('cheques/{id}/bounce', [ChequeController::class, 'bounce']);
     Route::post('cheques/{id}/cancel', [ChequeController::class, 'cancel']);
+
+    // In-app notifications
+    Route::get('notifications', [App\Http\Controllers\NotificationController::class, 'index']);
+    Route::post('notifications/{id}/read', [App\Http\Controllers\NotificationController::class, 'markRead']);
+    Route::post('notifications/mark-all-read', [App\Http\Controllers\NotificationController::class, 'markAllRead']);
 
     // Credit Note Routes (linked to invoices)
     Route::get('credit-notes/by-invoice/{invoiceId}', [CreditNoteController::class, 'getByInvoice']);

@@ -167,7 +167,14 @@ class Order extends Model
 
     public function latestOrderDispatch()
     {
-        return $this->hasOne(OrderDispatch::class, 'order_id')->latestOfMany();
+        // NOT ->latestOfMany(): Eloquent's ofMany() always adds a MAX(id)
+        // tiebreak internally even when another column is specified, and id
+        // is a native Postgres uuid column with no MAX() aggregate defined -
+        // that throws "function max(uuid) does not exist" for any order
+        // that actually has a dispatch. hasOne()->latest() is the older,
+        // pre-ofMany() idiom for "latest related row" and doesn't hit this,
+        // since it's a plain ORDER BY rather than an aggregate subquery.
+        return $this->hasOne(OrderDispatch::class, 'order_id')->latest('created_at');
     }
 
     /**

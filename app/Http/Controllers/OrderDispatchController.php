@@ -287,6 +287,13 @@ class OrderDispatchController extends Controller
                     $dispatchItem->packaging_breakdown = $orderItem->packaging_breakdown;
                 }
 
+                // Carry over which batch(es) FEFO drew from at order time, so
+                // whoever picks/packs this dispatch knows exactly which
+                // batch/expiry to pull off the shelf.
+                if (!empty($orderItem->batch_allocations)) {
+                    $dispatchItem->batch_allocations = $orderItem->batch_allocations;
+                }
+
                 $dispatchItem->damaged_quantity = 0;
                 $dispatchItem->save();
             }

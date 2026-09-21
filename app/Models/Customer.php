@@ -188,7 +188,9 @@ class Customer extends Model
 
     public function latestApproval()
     {
-        return $this->hasOne(CustomerApproval::class, 'customer_id')->latestOfMany();
+        // NOT ->latestOfMany(): see App\Models\Order::latestOrderDispatch()
+        // for why - same uuid-primary-key incompatibility.
+        return $this->hasOne(CustomerApproval::class, 'customer_id')->latest('created_at');
     }
 
     public function company()

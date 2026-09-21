@@ -5,6 +5,7 @@ namespace App\Http\Controllers;
 use App\Models\Invoice;
 use App\Models\InvoiceLineItem;
 use App\Models\Customer;
+use App\Models\Logistic;
 use App\Models\Order;
 use App\Models\Payment;
 use App\Models\PaymentAllocation;
@@ -242,6 +243,18 @@ class InvoiceController extends Controller
             'payment_terms' => 'nullable|string',
             'notes' => 'nullable|string',
             'terms_and_conditions' => 'nullable|string',
+            'delivery_note_number' => 'nullable|string|max:100',
+            'delivery_note_date' => 'nullable|date',
+            'reference_number' => 'nullable|string|max:100',
+            'reference_date' => 'nullable|date',
+            'other_references' => 'nullable|string|max:255',
+            'buyers_order_no' => 'nullable|string|max:100',
+            'buyers_order_date' => 'nullable|date',
+            'dispatch_doc_no' => 'nullable|string|max:100',
+            'dispatched_through' => 'nullable|string|max:100',
+            'destination' => 'nullable|string|max:100',
+            'terms_of_delivery' => 'nullable|string|max:255',
+            'mode_of_payment' => 'nullable|string|max:100',
             'generate_etims_receipt' => 'sometimes|boolean',
             'line_items' => 'required|array|min:1',
             'line_items.*.product_id' => 'nullable|exists:products,id',
@@ -249,6 +262,8 @@ class InvoiceController extends Controller
             'line_items.*.description' => 'required|string',
             'line_items.*.quantity' => 'required|numeric|min:0.01',
             'line_items.*.unit' => 'sometimes|string',
+            'line_items.*.batch_number' => 'nullable|string|max:100',
+            'line_items.*.expiry_date' => 'nullable|date',
             'line_items.*.unit_price' => 'required|numeric|min:0',
             'line_items.*.discount_amount' => 'sometimes|numeric|min:0',
             'line_items.*.tax_rate' => 'sometimes|numeric|min:0|max:100',
@@ -298,6 +313,18 @@ class InvoiceController extends Controller
                 'payment_terms' => $credit['payment_terms'],
                 'notes' => $request->notes,
                 'terms_and_conditions' => $request->terms_and_conditions,
+                'delivery_note_number' => $request->delivery_note_number,
+                'delivery_note_date' => $request->delivery_note_date,
+                'reference_number' => $request->reference_number,
+                'reference_date' => $request->reference_date,
+                'other_references' => $request->other_references,
+                'buyers_order_no' => $request->buyers_order_no ?: $this->generateBuyersOrderNo($user->company_id),
+                'buyers_order_date' => $request->buyers_order_date,
+                'dispatch_doc_no' => $request->dispatch_doc_no,
+                'dispatched_through' => $request->dispatched_through,
+                'destination' => $request->destination,
+                'terms_of_delivery' => $request->terms_of_delivery,
+                'mode_of_payment' => $request->mode_of_payment,
                 'etims_requested' => $request->boolean('generate_etims_receipt', true),
                 'created_by' => $user->id,
                 'subtotal' => 0,
@@ -323,6 +350,8 @@ class InvoiceController extends Controller
                     'description' => $lineItemData['description'],
                     'quantity' => $lineItemData['quantity'],
                     'unit' => $lineItemData['unit'] ?? 'pcs',
+                    'batch_number' => $lineItemData['batch_number'] ?? null,
+                    'expiry_date' => $lineItemData['expiry_date'] ?? null,
                     'unit_price' => $lineItemData['unit_price'],
                     'discount_amount' => $lineItemData['discount_amount'] ?? 0,
                     'tax_rate' => \App\Services\TaxCompliance\EtimsTaxType::rate($taxTypeCode),
@@ -390,7 +419,7 @@ class InvoiceController extends Controller
                 if (!$this->hasPermission($request, 'can_view_invoices', $companyId)) {
                     return response()->json(['message' => 'Unauthorized'], 403);
                 }
-                $invoice = Invoice::with(['customer', 'order', 'lineItems.product', 'lineItems.variant', 'createdBy'])
+                $invoice = Invoice::with(['customer', 'order', 'lineItems.product', 'lineItems.variant', 'createdBy', 'company'])
                     ->where('company_id', $companyId)
                     ->findOrFail($id);
                 return response()->json($invoice);
@@ -425,6 +454,18 @@ class InvoiceController extends Controller
             'payment_terms' => 'nullable|string',
             'notes' => 'nullable|string',
             'terms_and_conditions' => 'nullable|string',
+            'delivery_note_number' => 'nullable|string|max:100',
+            'delivery_note_date' => 'nullable|date',
+            'reference_number' => 'nullable|string|max:100',
+            'reference_date' => 'nullable|date',
+            'other_references' => 'nullable|string|max:255',
+            'buyers_order_no' => 'nullable|string|max:100',
+            'buyers_order_date' => 'nullable|date',
+            'dispatch_doc_no' => 'nullable|string|max:100',
+            'dispatched_through' => 'nullable|string|max:100',
+            'destination' => 'nullable|string|max:100',
+            'terms_of_delivery' => 'nullable|string|max:255',
+            'mode_of_payment' => 'nullable|string|max:100',
             'generate_etims_receipt' => 'sometimes|boolean',
             'payment_type' => 'sometimes|in:cash,credit',
             'credit_terms_days' => 'nullable|integer|min:0',
@@ -436,6 +477,8 @@ class InvoiceController extends Controller
             'line_items.*.description' => 'required|string',
             'line_items.*.quantity' => 'required|numeric|min:0.01',
             'line_items.*.unit' => 'sometimes|string',
+            'line_items.*.batch_number' => 'nullable|string|max:100',
+            'line_items.*.expiry_date' => 'nullable|date',
             'line_items.*.unit_price' => 'required|numeric|min:0',
             'line_items.*.discount_amount' => 'sometimes|numeric|min:0',
             'line_items.*.tax_rate' => 'sometimes|numeric|min:0|max:100',
@@ -458,6 +501,18 @@ class InvoiceController extends Controller
                 'payment_terms',
                 'notes',
                 'terms_and_conditions',
+                'delivery_note_number',
+                'delivery_note_date',
+                'reference_number',
+                'reference_date',
+                'other_references',
+                'buyers_order_no',
+                'buyers_order_date',
+                'dispatch_doc_no',
+                'dispatched_through',
+                'destination',
+                'terms_of_delivery',
+                'mode_of_payment',
                 'status',
                 'payment_type',
                 'credit_terms_days',
@@ -488,6 +543,8 @@ class InvoiceController extends Controller
                         'description' => $lineItemData['description'],
                         'quantity' => $lineItemData['quantity'],
                         'unit' => $lineItemData['unit'] ?? 'pcs',
+                        'batch_number' => $lineItemData['batch_number'] ?? null,
+                        'expiry_date' => $lineItemData['expiry_date'] ?? null,
                         'unit_price' => $lineItemData['unit_price'],
                         'discount_amount' => $lineItemData['discount_amount'] ?? 0,
                         'tax_rate' => \App\Services\TaxCompliance\EtimsTaxType::rate($taxTypeCode),
@@ -580,7 +637,15 @@ class InvoiceController extends Controller
 
         try {
             $user = $request->user();
-            $order = Order::with(['orderItems.product', 'orderItems.variant', 'customer'])
+            $order = Order::with([
+                'orderItems.product',
+                'orderItems.variant',
+                'customer.account.directors',
+                'deliveryLocation',
+                'deliveryDetails',
+                'latestOrderDispatch',
+                'salesRep',
+            ])
                 ->where('company_id', $user->company_id)
                 ->findOrFail($orderId);
 
@@ -615,6 +680,29 @@ class InvoiceController extends Controller
             }
             $invoiceStatus = $this->calculateInvoiceStatus($amountPaid, $totalAmount, $credit['due_date']);
 
+            // Pull the reference/dispatch details straight from the order
+            // this invoice is being created from, rather than leaving them
+            // for manual re-entry - the data already exists in the system.
+            $dispatch = $order->latestOrderDispatch;
+            $deliveryDetail = $order->deliveryDetails->first();
+            // The dispatch's own logistics entry carries the delivery company
+            // and destination actually picked when the dispatch was created -
+            // that's the source of truth here, not the order's delivery
+            // details (which only records a generic method like "courier").
+            $logistic = $dispatch
+                ? Logistic::where('order_dispatch_id', $dispatch->id)->latest()->first()
+                : null;
+            $destination = collect([$logistic?->delivery_location, $logistic?->state])
+                ->filter()
+                ->implode(', ') ?: ($order->deliveryLocation?->estate ?: $order->deliveryLocation?->city);
+            // "Other References" on the reference invoice format is the
+            // customer's primary contact - the first director on their
+            // credit account (name - phone).
+            $director1 = $order->customer?->account?->directors?->first();
+            $otherReferences = $director1
+                ? trim($director1->name . ($director1->phone_number ? ' - ' . $director1->phone_number : ''))
+                : null;
+
             $invoice = Invoice::create([
                 'company_id' => $user->company_id,
                 'customer_id' => $order->customer_id,
@@ -629,6 +717,24 @@ class InvoiceController extends Controller
                 'currency' => $order->currency ?? 'KES',
                 'payment_terms' => $credit['payment_terms'],
                 'notes' => $request->notes,
+                // A running per-company counter, independent of the order
+                // number, per the printed invoice format.
+                'buyers_order_no' => $this->generateBuyersOrderNo($user->company_id),
+                'buyers_order_date' => $order->order_date,
+                'mode_of_payment' => $credit['payment_terms'],
+                // A dispatch's delivery note and dispatch doc are the same
+                // physical document in this system, hence the shared number.
+                'dispatch_doc_no' => $dispatch?->dispatch_number,
+                'delivery_note_number' => $dispatch?->dispatch_number,
+                // The date the dispatch is scheduled to deliver by, not the
+                // date the dispatch record itself was created.
+                'delivery_note_date' => $dispatch?->estimated_delivery_date,
+                'dispatched_through' => $logistic?->logistics_provider ?: ($logistic?->delivery_method ?: $deliveryDetail?->delivery_method),
+                'destination' => $destination,
+                // The order IS the buyer's reference document for this sale.
+                'reference_number' => $order->order_number,
+                'reference_date' => $order->order_date,
+                'other_references' => $otherReferences,
                 'created_by' => $user->id,
                 'subtotal' => 0,
                 'tax_amount' => 0,
@@ -642,6 +748,19 @@ class InvoiceController extends Controller
 
             // Create line items from order items
             foreach ($order->orderItems as $orderItem) {
+                // The order already recorded exactly which batch(es) FEFO
+                // drew from at order-creation time - carry that onto the
+                // invoice rather than leaving it for manual entry. If a line
+                // spanned more than one batch, list every batch number and
+                // use the earliest expiry (the more conservative date).
+                $batchNumber = null;
+                $expiryDate = null;
+                $allocations = $orderItem->batch_allocations ?? [];
+                if (!empty($allocations)) {
+                    $batchNumber = collect($allocations)->pluck('batch_number')->filter()->unique()->implode(', ');
+                    $expiryDate = collect($allocations)->pluck('expiry_date')->filter()->sort()->first();
+                }
+
                 InvoiceLineItem::create([
                     'invoice_id' => $invoice->id,
                     'product_id' => $orderItem->product_id,
@@ -649,6 +768,8 @@ class InvoiceController extends Controller
                     'description' => $orderItem->product->name . ($orderItem->variant ? ' - ' . $orderItem->variant->name : ''),
                     'quantity' => $orderItem->quantity,
                     'unit' => 'pcs',
+                    'batch_number' => $batchNumber ?: null,
+                    'expiry_date' => $expiryDate ?: null,
                     'unit_price' => $orderItem->unit_price ?? $orderItem->price ?? $orderItem->total_price ?? 0,
                     'discount_amount' => 0,
                     'tax_rate' => 0,
@@ -1043,6 +1164,24 @@ class InvoiceController extends Controller
 
         $nextNumber = $lastInvoice ? (int) substr($lastInvoice->invoice_number, strlen($prefix)) + 1 : 1;
         return $prefix . str_pad($nextNumber, 4, '0', STR_PAD_LEFT);
+    }
+
+    /**
+     * Generate the next Buyer's Order No. for the company - a plain,
+     * zero-padded counter (001, 002, ...) that increments with every
+     * invoice, independent of the underlying order's own order number.
+     */
+    protected function generateBuyersOrderNo($companyId)
+    {
+        $last = DB::table('invoices')
+            ->where('company_id', $companyId)
+            ->whereRaw("buyers_order_no ~ '^[0-9]+$'")
+            ->orderByRaw('length(buyers_order_no) desc, buyers_order_no desc')
+            ->lockForUpdate()
+            ->value('buyers_order_no');
+
+        $nextNumber = $last ? ((int) $last) + 1 : 1;
+        return str_pad($nextNumber, 3, '0', STR_PAD_LEFT);
     }
 
     /**

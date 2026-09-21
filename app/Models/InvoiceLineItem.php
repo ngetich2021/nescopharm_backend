@@ -23,6 +23,8 @@ class InvoiceLineItem extends Model
         'description',
         'quantity',
         'unit',
+        'batch_number',
+        'expiry_date',
         'unit_price',
         'discount_amount',
         'tax_rate',
@@ -33,6 +35,7 @@ class InvoiceLineItem extends Model
 
     protected $casts = [
         'quantity' => 'decimal:2',
+        'expiry_date' => 'date',
         'unit_price' => 'decimal:2',
         'discount_amount' => 'decimal:2',
         'tax_rate' => 'decimal:2',

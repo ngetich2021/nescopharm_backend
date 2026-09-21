@@ -15,6 +15,8 @@ use Illuminate\Support\Arr;
 use Illuminate\Support\Facades\DB;
 use App\Http\Traits\HandlesDatabaseErrors;
 use Illuminate\Support\Facades\Storage;
+use App\Services\CustomerStatementService;
+use Carbon\Carbon;
 
 class CustomerController extends Controller
 {
@@ -431,7 +433,7 @@ class CustomerController extends Controller
             });
         }
 
-        $customers = $query->orderBy('name')->get();
+        $customers = $query->orderBy('created_at', 'desc')->get();
 
         return response()->json([
             'status' => 'success',
@@ -467,6 +469,9 @@ class CustomerController extends Controller
                     'orders.payments' => function ($query) {
                         $query->select('id', 'order_id', 'amount_paid', 'payment_method', 'status', 'created_at');
                     },
+                    'notes' => function ($query) {
+                        $query->orderByDesc('created_at');
+                    },
                 ])
                 ->first();
 
@@ -489,6 +494,19 @@ class CustomerController extends Controller
             $customerArr['total_spend'] = number_format($total_spend, 2, '.', '');
             $customerArr['total_orders'] = $total_orders;
 
+            // Customer::$notes is ambiguous - it's both a plain text column
+            // AND a hasMany(CustomerNote) relation sharing the same name.
+            // toArray() merges relationsToArray() over attributesToArray(),
+            // so with the relation eager-loaded, $customerArr['notes'] here
+            // is actually the array of CustomerNote records, not the plain
+            // column (that's only true of direct property access like
+            // $customer->notes, which resolves attributes first). Put the
+            // note records under their own key, and restore the actual
+            // plain-text column for 'notes' so callers expecting a string
+            // don't receive an array of objects instead.
+            $customerArr['customer_notes'] = $customer->getRelation('notes');
+            $customerArr['notes'] = $customer->getAttribute('notes');
+
             return response()->json([
                 'status' => 'success',
                 'message' => 'Customer profile retrieved successfully.',
@@ -499,6 +517,41 @@ class CustomerController extends Controller
             return response()->json([
                 'status' => 'failed',
                 'message' => 'Failed to retrieve customer profile: ' . $e->getMessage(),
+            ], 500);
+        }
+    }
+
+    /**
+     * A customer's account statement for a given period (defaults to the
+     * current calendar month) - view/print/PDF-download source data.
+     */
+    public function statement(Request $request, string $customerId, CustomerStatementService $statementService)
+    {
+        $user = $request->user();
+        $customer = Customer::find($customerId);
+        if (!$customer) {
+            return response()->json(['status' => 'failed', 'message' => 'Customer not found.'], 404);
+        }
+        if (!$this->hasPermission($request, 'can_view_customers', $customer->company_id)) {
+            return response()->json(['status' => 'failed', 'message' => 'Unauthorized to view customer statement.'], 403);
+        }
+
+        $from = $request->filled('date_from')
+            ? Carbon::parse($request->input('date_from'))->startOfDay()
+            : Carbon::now()->startOfMonth();
+        $to = $request->filled('date_to')
+            ? Carbon::parse($request->input('date_to'))->endOfDay()
+            : Carbon::now()->endOfMonth();
+
+        try {
+            $statement = $statementService->generate($customer->company_id, $customerId, $from, $to);
+
+            return response()->json(['status' => 'success', 'data' => $statement]);
+        } catch (\Exception $e) {
+            Log::error('Failed to generate customer statement', ['error' => $e->getMessage()]);
+            return response()->json([
+                'status' => 'failed',
+                'message' => 'Failed to generate customer statement: ' . $e->getMessage(),
             ], 500);
         }
     }

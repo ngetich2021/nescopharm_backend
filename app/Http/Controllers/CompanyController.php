@@ -37,9 +37,16 @@ class CompanyController extends Controller
             'jpg', 'jpeg' => 'image/jpeg',
         };
 
-        return response(file_get_contents($path), 200, [
+        // response()->file() sets Last-Modified/ETag from the file itself and
+        // handles conditional GETs (If-Modified-Since/If-None-Match), so a
+        // browser automatically picks up a replaced logo/letterhead instead
+        // of blindly trusting a flat max-age the way the old plain
+        // response(file_get_contents(...)) call did with no validator at all.
+        // Cache lifetime is kept short since this is an admin-editable asset,
+        // not a hashed/versioned build artifact.
+        return response()->file($path, [
             'Content-Type' => $mime,
-            'Cache-Control' => 'public, max-age=86400',
+            'Cache-Control' => 'public, max-age=300, must-revalidate',
             'Access-Control-Allow-Origin' => '*',
         ]);
     }

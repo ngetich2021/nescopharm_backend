@@ -48,7 +48,7 @@ class ReportController extends Controller
             return response()->json(['status' => 'failed', 'message' => 'Unauthorized.'], 403);
         }
 
-        $type = $request->input('type', 'balance'); // balance, low_stock, movement
+        $type = $request->input('type', 'balance'); // balance, low_stock, movement, stock_management
         $filters = $request->all();
 
         try {
@@ -59,6 +59,9 @@ class ReportController extends Controller
                     break;
                 case 'movement':
                     $result = $this->reportService->forCompany($companyId)->getInventoryMovementLog($filters);
+                    break;
+                case 'stock_management':
+                    $result = $this->reportService->forCompany($companyId)->getStockManagementReport($filters);
                     break;
                 case 'balance':
                 default:

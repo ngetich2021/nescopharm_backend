@@ -171,4 +171,36 @@ class Company extends Model
         return false;
     }
 
+    /**
+     * Append a cache-busting version (the asset file's own mtime) to
+     * logo/letterhead URLs, so replacing the file on disk is picked up by
+     * every consumer immediately instead of waiting out the asset route's
+     * Cache-Control max-age or a browser's cached copy of the old bytes.
+     */
+    public function getLogoUrlAttribute($value)
+    {
+        return $this->withAssetCacheBuster($value);
+    }
+
+    public function getLetterheadUrlAttribute($value)
+    {
+        return $this->withAssetCacheBuster($value);
+    }
+
+    protected function withAssetCacheBuster(?string $url): ?string
+    {
+        if (!$url || !str_contains($url, '/api/company-assets/')) {
+            return $url;
+        }
+
+        $filename = basename(parse_url($url, PHP_URL_PATH));
+        $path = storage_path('app/company-assets/' . $filename);
+        if (!is_file($path)) {
+            return $url;
+        }
+
+        $separator = str_contains($url, '?') ? '&' : '?';
+        return $url . $separator . 'v=' . filemtime($path);
+    }
+
 }

@@ -15,6 +15,9 @@ class Kernel extends ConsoleKernel
     {
         // $schedule->command('eod:process')->dailyAt('20:59');
         $schedule->command('dispatch:send-return-reminders')->dailyAt('08:00');
+        $schedule->command('cheques:send-maturity-reminders')->dailyAt('08:00');
+        $schedule->command('batches:refresh-status')->dailyAt('00:05');
+        $schedule->command('customers:generate-statements')->monthlyOn(1, '01:00');
 
         // Recover eTIMS invoices left locked by an interrupted worker.
         $schedule->job(new EtimsReaperJob())->everyFiveMinutes()->withoutOverlapping();
