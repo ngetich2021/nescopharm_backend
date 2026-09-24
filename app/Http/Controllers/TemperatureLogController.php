@@ -10,13 +10,22 @@ use Illuminate\Support\Facades\Validator;
 
 class TemperatureLogController extends Controller
 {
-    // Morning readings must be captured before 10:00, afternoon ones from
-    // 12:00 - matches the physical routine (open-of-day vs midday check)
-    // and stops a reading being backfilled outside the window it's meant
-    // to represent. Only enforced for today's row; past dates can still be
-    // corrected any time.
-    protected const MORNING_CUTOFF_HOUR = 10;
+    // Morning readings must be captured before noon, afternoon ones from
+    // noon onward - matches the physical routine (open-of-day vs midday
+    // check) and stops a reading being backfilled outside the window it's
+    // meant to represent. Only enforced for today's row; past dates can
+    // still be corrected any time. These must meet at the same hour - a gap
+    // between them (e.g. cutoff 10, start 12) makes both windows closed for
+    // anyone logging in between, which is exactly what broke capture here.
+    protected const MORNING_CUTOFF_HOUR = 12;
     protected const AFTERNOON_START_HOUR = 12;
+
+    // config('app.timezone') is UTC - stores are physically in East Africa
+    // (UTC+3), so comparing against raw UTC now() put the window 3 hours
+    // behind the wall clock (e.g. rejecting an afternoon reading at 2pm
+    // local because the server still thought it was 11am). Every "what time
+    // is it right now" check in this controller must go through this.
+    protected const BUSINESS_TIMEZONE = 'Africa/Nairobi';
 
     public function __construct()
     {
@@ -32,12 +41,14 @@ class TemperatureLogController extends Controller
      */
     protected function captureWindowError(Request $request, ?TemperatureLog $existing): ?string
     {
+        $nowLocal = now()->setTimezone(self::BUSINESS_TIMEZONE);
+
         $logDate = $request->input('log_date', $existing?->log_date?->toDateString());
-        if (!$logDate || !Carbon::parse($logDate)->isToday()) {
+        if (!$logDate || !Carbon::parse($logDate, self::BUSINESS_TIMEZONE)->isSameDay($nowLocal)) {
             return null;
         }
 
-        $hour = now()->hour;
+        $hour = $nowLocal->hour;
 
         if ($request->has('morning_temp')) {
             $new = $request->input('morning_temp');
@@ -79,6 +90,27 @@ class TemperatureLogController extends Controller
         // Temperature records are a sub-feature of SOPs/compliance - reuse
         // those permissions rather than adding a whole new permission set.
         return $role->hasPermission($permission) || $role->hasPermission('can_view_sops');
+    }
+
+    /**
+     * Deleting a temperature log is reserved for GM/Director specifically -
+     * unlike every other action here, it deliberately does NOT fall back to
+     * can_delete_sops/can_view_sops, since store staff logging readings
+     * shouldn't also be able to erase them.
+     */
+    protected function isGmOrDirector(Request $request, ?string $resourceCompanyId = null): bool
+    {
+        $role = $request->user()->role;
+        if (!$role) {
+            return false;
+        }
+        if ($role->hasPermission('can_manage_system')) {
+            return true;
+        }
+        if ($role->hasPermission('can_manage_company')) {
+            return $resourceCompanyId === null || $request->user()->company_id === $resourceCompanyId;
+        }
+        return false;
     }
 
     public function index(Request $request): JsonResponse
@@ -210,8 +242,8 @@ class TemperatureLogController extends Controller
         $user = $request->user();
         $companyId = $user->company_id;
 
-        if (!$this->hasPermission($request, 'can_delete_sops', $companyId)) {
-            return response()->json(['message' => 'Unauthorized'], 403);
+        if (!$this->isGmOrDirector($request, $companyId)) {
+            return response()->json(['message' => 'Only GM or Directors can delete temperature logs.'], 403);
         }
 
         $log = TemperatureLog::forCompany($companyId)->findOrFail($id);

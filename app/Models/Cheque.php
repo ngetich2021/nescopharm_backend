@@ -24,6 +24,7 @@ class Cheque extends Model
         'invoice_id',
         'purchase_order_id',
         'payment_id',
+        'supplier_payment_id',
         'cheque_number',
         'bank_name',
         'amount',
@@ -122,6 +123,11 @@ class Cheque extends Model
     public function payment()
     {
         return $this->belongsTo(Payment::class);
+    }
+
+    public function supplierPayment()
+    {
+        return $this->belongsTo(SupplierPayment::class);
     }
 
     public function createdBy()

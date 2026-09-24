@@ -76,6 +76,7 @@ class Customer extends Model
         'contact_person_name',
         'contact_person_phone',
         'contact_person_email',
+        'contact_person_designation',
         'business_name',
         'trading_name',
         'business_type',

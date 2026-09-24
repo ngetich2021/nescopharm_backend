@@ -178,10 +178,30 @@ class ProductController extends Controller
             ->delete();
     }
 
+    /**
+     * Permissions whose owner needs to browse the product catalog as part of
+     * their own workflow (picking items/prices for a quote, order, requisition
+     * or purchase order) even without full Product Management rights.
+     */
+    protected const PRODUCT_BROWSING_WORKFLOW_PERMISSIONS = [
+        'can_view_products',
+        'can_create_quotes',
+        'can_update_quotes',
+        'can_create_orders',
+        'can_update_orders',
+        'can_create_requisitions',
+        'can_update_requisitions',
+        'can_create_purchase_orders',
+        'can_update_purchase_orders',
+    ];
+
     public function index(Request $request)
     {
         $user = $request->user();
-        if (!$this->hasPermission($request, 'can_view_products', $user->company_id)) {
+        $canBrowseProducts = collect(self::PRODUCT_BROWSING_WORKFLOW_PERMISSIONS)
+            ->contains(fn ($permission) => $this->hasPermission($request, $permission, $user->company_id));
+
+        if (!$canBrowseProducts) {
             return response()->json([
                 'status' => 'failed',
                 'message' => 'Unauthorized to view products.',

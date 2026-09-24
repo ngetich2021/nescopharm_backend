@@ -176,6 +176,7 @@ class CustomerController extends Controller
                     'contact_person_name' => 'nullable|string|max:255',
                     'contact_person_phone' => 'nullable|string|max:50',
                     'contact_person_email' => 'nullable|email|max:255',
+                    'contact_person_designation' => 'nullable|string|max:255',
                     'accounts_contact_name' => 'nullable|string|max:255',
                     'accounts_contact_designation' => 'nullable|string|max:255',
                     'accounts_contact_phone' => 'nullable|string|max:50',
@@ -236,6 +237,7 @@ class CustomerController extends Controller
                     'contact_person_name' => $customerData['contact_person_name'] ?? null,
                     'contact_person_phone' => $customerData['contact_person_phone'] ?? null,
                     'contact_person_email' => $customerData['contact_person_email'] ?? null,
+                    'contact_person_designation' => $customerData['contact_person_designation'] ?? null,
                     'accounts_contact_name' => $customerData['accounts_contact_name'] ?? null,
                     'accounts_contact_designation' => $customerData['accounts_contact_designation'] ?? null,
                     'accounts_contact_phone' => $customerData['accounts_contact_phone'] ?? null,
@@ -310,6 +312,7 @@ class CustomerController extends Controller
             'telephone' => 'nullable|string|max:50',
             'region' => 'nullable|string|max:100',
             'county' => 'nullable|string|max:100',
+            'contact_person_designation' => 'nullable|string|max:255',
             'accounts_contact_name' => 'nullable|string|max:255',
             'accounts_contact_designation' => 'nullable|string|max:255',
             'accounts_contact_phone' => 'nullable|string|max:50',
@@ -364,6 +367,7 @@ class CustomerController extends Controller
                 'contact_person_name' => $request->input('contact_person_name', $customer->contact_person_name),
                 'contact_person_phone' => $request->input('contact_person_phone', $customer->contact_person_phone),
                 'contact_person_email' => $request->input('contact_person_email', $customer->contact_person_email),
+                'contact_person_designation' => $request->input('contact_person_designation', $customer->contact_person_designation),
                 'business_name' => $request->input('business_name', $customer->business_name),
                 'trading_name' => $request->input('trading_name', $customer->trading_name),
                 'business_type' => $request->input('business_type', $customer->business_type),
@@ -416,8 +420,18 @@ class CustomerController extends Controller
         // pending applications (e.g. the approvals management screen).
         $includePending = $request->boolean('include_pending')
             && $this->hasPermission($request, 'can_approve_account', $user->company_id);
-        if (!$includePending) {
+
+        // A rep filtering to their own created_by is looking at their own POS
+        // activity (e.g. "customers I created, pending or not"), not picking a
+        // customer to transact with - let them see their own regardless of
+        // approval_status, but not other reps' pending applications.
+        $filteringOwnCreations = $request->filled('created_by') && $request->input('created_by') === $user->id;
+        if (!$includePending && !$filteringOwnCreations) {
             $query->where('approval_status', 'approved');
+        }
+
+        if ($request->filled('created_by')) {
+            $query->where('created_by', $request->input('created_by'));
         }
 
         if ($request->filled('search')) {
@@ -723,7 +737,7 @@ class CustomerController extends Controller
             'expiry_date' => 'nullable|date',
             'regulatory_body' => 'nullable|string|max:255',
             'other_information' => 'nullable|string',
-            'document_image' => 'nullable|file|max:5120',
+            'document_image' => 'nullable|file|max:15360',
         ]);
 
         if ($validator->fails()) {

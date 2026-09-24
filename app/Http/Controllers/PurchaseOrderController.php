@@ -60,6 +60,35 @@ class PurchaseOrderController extends Controller
         return $prefix . str_pad($nextNumber, 4, '0', STR_PAD_LEFT);
     }
 
+    /**
+     * Recompute and persist total_amount from the order's current items plus
+     * shipping/logistics minus discount, and refresh payment_status against
+     * whatever amount_paid already is. Must run after items are created,
+     * updated or removed - nothing else keeps total_amount in sync.
+     */
+    protected function recalculateTotal(PurchaseOrder $purchaseOrder): void
+    {
+        $itemsTotal = (float) $purchaseOrder->items()->sum('subtotal');
+        $totalAmount = $itemsTotal
+            + (float) $purchaseOrder->shipping_cost
+            + (float) $purchaseOrder->logistics_cost
+            - (float) $purchaseOrder->discount;
+        $totalAmount = max(0, $totalAmount);
+
+        $amountPaid = (float) $purchaseOrder->amount_paid;
+        $status = 'unpaid';
+        if ($totalAmount > 0 && $amountPaid >= $totalAmount) {
+            $status = 'paid';
+        } elseif ($amountPaid > 0) {
+            $status = 'partial';
+        }
+
+        $purchaseOrder->update([
+            'total_amount' => $totalAmount,
+            'payment_status' => $status,
+        ]);
+    }
+
     // List all purchase orders for the user's company
     public function index(Request $request)
     {
@@ -215,6 +244,8 @@ class PurchaseOrderController extends Controller
                 ]);
             }
 
+            $this->recalculateTotal($purchaseOrder);
+
             DB::commit();
             return response()->json([
                 'status' => 'success',
@@ -344,6 +375,8 @@ class PurchaseOrderController extends Controller
                     ]);
                 }
             }
+
+            $this->recalculateTotal($purchaseOrder);
 
             DB::commit();
             return response()->json([

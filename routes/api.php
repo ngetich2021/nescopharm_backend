@@ -39,6 +39,7 @@ use App\Http\Controllers\PayrollConfigurationController;
 use App\Http\Controllers\LeaveController;
 use App\Http\Controllers\SalaryAdvanceController;
 use App\Http\Controllers\EmployeeSelfServiceController;
+use App\Http\Controllers\DailyWorkReportController;
 use App\Http\Controllers\TimeEntryController;
 use App\Http\Controllers\TaxRateController;
 use App\Http\Controllers\FinancialReportController;
@@ -153,11 +154,19 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::apiResource('salary-advances', SalaryAdvanceController::class);
     Route::post('salary-advances/{id}/approve', [SalaryAdvanceController::class, 'approve']);
 
+    // Daily Work Reports (skip Sundays; workers -> GM, GM -> Managing Director)
+    Route::get('daily-reports', [DailyWorkReportController::class, 'index']);
+    Route::get('daily-reports/{id}', [DailyWorkReportController::class, 'show']);
+    Route::post('daily-reports/{id}/approve', [DailyWorkReportController::class, 'approve']);
+    Route::post('daily-reports/{id}/reject', [DailyWorkReportController::class, 'reject']);
+
     Route::get('employee-portal/me', [EmployeeSelfServiceController::class, 'me']);
     Route::get('employee-portal/leave-requests', [EmployeeSelfServiceController::class, 'leaveIndex']);
     Route::post('employee-portal/leave-requests', [EmployeeSelfServiceController::class, 'leaveStore']);
     Route::get('employee-portal/salary-advances', [EmployeeSelfServiceController::class, 'salaryAdvanceIndex']);
     Route::post('employee-portal/salary-advances', [EmployeeSelfServiceController::class, 'salaryAdvanceStore']);
+    Route::get('employee-portal/daily-reports', [EmployeeSelfServiceController::class, 'dailyReportIndex']);
+    Route::post('employee-portal/daily-reports', [EmployeeSelfServiceController::class, 'dailyReportStore']);
 
     // Time Entries
     Route::apiResource('time-entries', TimeEntryController::class);
@@ -281,6 +290,7 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('/customers/{customerId}/approvals', [CustomerApprovalController::class, 'index']);
     Route::post('/customers/{customerId}/approvals', [CustomerApprovalController::class, 'store']);
     Route::post('/customers/{customerId}/signed-application', [CustomerApprovalController::class, 'uploadSignedApplication']);
+    Route::post('/customers/{customerId}/stamped-application', [CustomerApprovalController::class, 'uploadStampedApplication']);
 
     // Customer Account routes
     Route::get('/customer-accounts', [CustomerAccountController::class, 'index']);
@@ -425,6 +435,8 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::match(['patch', 'put'], '/quotes/{quoteId}', [QuoteController::class, 'update'])->name('quotes.update');
     Route::delete('/quotes/{id}', [QuoteController::class, 'destroy'])->name('quotes.destroy');
     Route::post('/quotes/{quoteId}/convert-to-order', [QuoteController::class, 'convertToOrder'])->name('quotes.convertToOrder');
+    Route::post('/quotes/{quoteId}/confirm', [QuoteController::class, 'confirm'])->name('quotes.confirm');
+    Route::post('/quotes/{quoteId}/request-changes', [QuoteController::class, 'requestChanges'])->name('quotes.requestChanges');
     Route::post('/quotes/{id}/send', [QuoteController::class, 'sendQuote'])->name('quotes.send');
     // Delivery Person routes
     Route::get('/delivery-people', [DeliveryPersonController::class, 'index']);
@@ -938,6 +950,7 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::post('invoices/{id}/sync-amounts', [InvoiceController::class, 'syncInvoiceAmounts']);
     Route::post('payments/allocate-to-invoices', [InvoiceController::class, 'allocatePaymentToInvoices']);
     Route::get('payments/{paymentId}/available-amount', [InvoiceController::class, 'getPaymentAvailableAmount']);
+    Route::post('payments/{paymentId}/refund-overpayment', [InvoiceController::class, 'refundPaymentOverpayment']);
     Route::get('payments/{paymentId}/allocations', [InvoiceController::class, 'getPaymentAllocations']);
     Route::delete('payment-allocations/{allocationId}', [InvoiceController::class, 'deallocatePayment']);
     Route::get('invoices-sales-reps', [InvoiceController::class, 'getSalesReps']);

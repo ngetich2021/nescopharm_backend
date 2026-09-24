@@ -38,6 +38,26 @@ class StoreController extends Controller
     }
 
     /**
+     * Permissions whose owner needs to browse the store/location list as part
+     * of their own workflow (picking a warehouse/branch on a purchase order,
+     * expense, product receipt, stock count or product) even without full
+     * Store Management rights.
+     */
+    protected const STORE_BROWSING_WORKFLOW_PERMISSIONS = [
+        'can_view_stores',
+        'can_create_purchase_orders',
+        'can_update_purchase_orders',
+        'can_create_product_receipts',
+        'can_update_product_receipts',
+        'can_create_stock_counts',
+        'can_update_stock_counts',
+        'can_create_expenses',
+        'can_update_expenses',
+        'can_create_products',
+        'can_update_products',
+    ];
+
+    /**
      * List all active stores for the user's company.
      *
      * @param Request $request
@@ -46,7 +66,10 @@ class StoreController extends Controller
     public function index(Request $request)
     {
         $user = $request->user();
-        if (!$this->hasPermission($request, 'can_view_stores', $user->company_id)) {
+        $canBrowseStores = collect(self::STORE_BROWSING_WORKFLOW_PERMISSIONS)
+            ->contains(fn ($permission) => $this->hasPermission($request, $permission, $user->company_id));
+
+        if (!$canBrowseStores) {
             return response()->json([
                 'status' => 'failed',
                 'message' => 'Unauthorized to view stores.'

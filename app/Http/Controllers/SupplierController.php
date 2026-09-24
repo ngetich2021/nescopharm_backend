@@ -36,10 +36,31 @@ class SupplierController extends Controller
         return $role->hasPermission($permission);
     }
 
+    // Suppliers are browsed as a picker from several unrelated workflows
+    // (product create/edit, purchase orders, product receipts, supplier
+    // payments) - gating the list behind can_view_suppliers alone breaks
+    // any role that can do those things but isn't a supplier manager.
+    protected const SUPPLIER_BROWSING_WORKFLOW_PERMISSIONS = [
+        'can_view_suppliers',
+        'can_create_products',
+        'can_update_products',
+        'can_create_purchase_orders',
+        'can_update_purchase_orders',
+        'can_receive_purchase_orders',
+        'can_create_product_receipts',
+        'can_update_product_receipts',
+        'can_create_payments',
+        'can_update_payments',
+        'can_manage_payments',
+    ];
+
     public function index(Request $request)
     {
         $user = $request->user();
-        if (!$this->hasPermission($request, 'can_view_suppliers', $user->company_id)) {
+        $canBrowseSuppliers = collect(self::SUPPLIER_BROWSING_WORKFLOW_PERMISSIONS)
+            ->contains(fn ($permission) => $this->hasPermission($request, $permission, $user->company_id));
+
+        if (!$canBrowseSuppliers) {
             return response()->json([
                 'status' => 'failed',
                 'message' => 'Unauthorized to view suppliers.',
@@ -78,15 +99,20 @@ class SupplierController extends Controller
 
     public function show($id)
     {
-        $user = request()->user();
-        if (!$this->hasPermission(request(), 'can_view_suppliers')) {
+        $request = request();
+        $user = $request->user();
+        $canBrowseSuppliers = collect(self::SUPPLIER_BROWSING_WORKFLOW_PERMISSIONS)
+            ->contains(fn ($permission) => $this->hasPermission($request, $permission));
+        if (!$canBrowseSuppliers) {
             return response()->json(['status' => 'failed', 'message' => 'Unauthorized to view suppliers.', 'data' => null], 403);
         }
         $supplier = Supplier::find($id);
         if (!$supplier) {
             return response()->json(['status' => 'failed', 'message' => 'Supplier not found.', 'data' => null], 404);
         }
-        if (!$this->hasPermission(request(), 'can_view_suppliers', $supplier->company_id)) {
+        $canBrowseThisSupplier = collect(self::SUPPLIER_BROWSING_WORKFLOW_PERMISSIONS)
+            ->contains(fn ($permission) => $this->hasPermission($request, $permission, $supplier->company_id));
+        if (!$canBrowseThisSupplier) {
             return response()->json(['status' => 'failed', 'message' => 'Unauthorized to view supplier.', 'data' => null], 403);
         }
         if (!$supplier) {

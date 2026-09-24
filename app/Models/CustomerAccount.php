@@ -77,6 +77,8 @@ class CustomerAccount extends Model
         'currently_defaulted',
         'credit_terms',
         'notes',
+        'reviewed_by_name',
+        'reviewed_by_position',
         'created_by',
     ];
 

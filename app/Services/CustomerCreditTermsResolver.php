@@ -3,6 +3,8 @@
 namespace App\Services;
 
 use App\Models\Customer;
+use App\Models\Invoice;
+use App\Models\Order;
 use Carbon\Carbon;
 
 /**
@@ -38,5 +40,37 @@ class CustomerCreditTermsResolver
             'due_date' => $dueDate,
             'payment_terms' => $paymentTerms,
         ];
+    }
+
+    /**
+     * How much of this customer's credit limit is still unused - null if
+     * they have no credit limit set at all (credit isn't meaningful for
+     * them either way). Mirrors CustomerController::creditTerms() exactly
+     * (outstanding credit invoices + unpaid/uninvoiced credit orders count
+     * against the limit) so the number shown to a reviewer is the same one
+     * enforced when converting a quote to an order.
+     */
+    public function getAvailableCredit(Customer $customer): ?float
+    {
+        $creditRequired = $customer->account?->credit_required;
+        if ($creditRequired === null) {
+            return null;
+        }
+
+        $creditUsed = (float) Invoice::where('customer_id', $customer->id)
+            ->where('company_id', $customer->company_id)
+            ->where('payment_type', 'credit')
+            ->whereNotIn('status', ['cancelled'])
+            ->sum('balance_amount');
+
+        $creditUsed += Order::where('customer_id', $customer->id)
+            ->where('company_id', $customer->company_id)
+            ->where('payment_type', 'credit')
+            ->where('payment_status', '!=', 'paid')
+            ->whereDoesntHave('invoice')
+            ->get()
+            ->sum(fn ($order) => max(0, (float) $order->final_amount - (float) $order->amount_paid));
+
+        return max(0, (float) $creditRequired - $creditUsed);
     }
 }

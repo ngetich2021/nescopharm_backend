@@ -72,11 +72,22 @@ class RequisitionController extends Controller
             'approver_id' => 'nullable|uuid|exists:users,id',
             'notes' => 'nullable|string',
             'items' => 'required|array|min:1',
-            'items.*.product_id' => 'required|uuid|exists:products,id',
+            'items.*.product_id' => 'nullable|uuid|exists:products,id',
+            'items.*.custom_item_name' => 'nullable|string|max:255',
             'items.*.variant_id' => 'nullable|uuid|exists:product_variants,id',
             'items.*.quantity' => 'required|integer|min:1',
             'items.*.notes' => 'nullable|string',
         ]);
+        $validator->after(function ($validator) use ($data) {
+            foreach (($data['items'] ?? []) as $index => $item) {
+                if (empty($item['product_id']) && empty($item['custom_item_name'])) {
+                    $validator->errors()->add(
+                        "items.$index",
+                        'Each item needs either a product or a custom item name.'
+                    );
+                }
+            }
+        });
         if ($validator->fails()) {
             return response()->json([
                 'status' => 'failed',
@@ -91,8 +102,11 @@ class RequisitionController extends Controller
         $validated['company_id'] = $user->company_id;
         $validated['requester_id'] = $user->id;
 
-        // Stock check for each item
+        // Stock check for each item - skip custom (non-catalog) items, they have no stock to check
         foreach ($validated['items'] as $item) {
+            if (empty($item['product_id'])) {
+                continue;
+            }
             $product = Product::find($item['product_id']);
             if (!$product) {
                 return response()->json([
@@ -150,7 +164,8 @@ class RequisitionController extends Controller
                 RequisitionItem::create([
                     'id' => (string) Str::uuid(),
                     'requisition_id' => $requisition->id,
-                    'product_id' => $item['product_id'],
+                    'product_id' => $item['product_id'] ?? null,
+                    'custom_item_name' => $item['custom_item_name'] ?? null,
                     'variant_id' => $item['variant_id'] ?? null,
                     'quantity' => $item['quantity'],
                     'notes' => $item['notes'] ?? null,
@@ -190,7 +205,21 @@ class RequisitionController extends Controller
     }
 
 
-    // List all requisitions
+    /**
+     * True cross-company bypass (system admin, or an explicit cross-company
+     * grant) - checked on the raw role rather than the shared hasPermission()
+     * helper, since that helper already treats can_manage_company as a
+     * blanket "yes" to any permission and would otherwise let GM/Director
+     * see every company's requisitions instead of just their own.
+     */
+    protected function canManageAllCompanies(Request $request): bool
+    {
+        $role = $request->user()->role;
+        return $role && ($role->hasPermission('can_manage_system') || $role->hasPermission('can_manage_all_requisitions'));
+    }
+
+    // List all requisitions - everyone sees their own; GM/Director (and the
+    // cross-company bypass above) see every requisition in scope.
     public function index(Request $request)
     {
         if (!$this->hasPermission($request, 'can_view_requisitions')) {
@@ -201,10 +230,16 @@ class RequisitionController extends Controller
         }
         $user = $request->user();
         $query = Requisition::with(['items.product', 'items.variant', 'requester', 'company', 'approver']);
-        // Always filter by company unless blanket permission
-        if (!$this->hasPermission($request, 'can_manage_all_requisitions')) {
+
+        $canManageAllCompanies = $this->canManageAllCompanies($request);
+        if (!$canManageAllCompanies) {
             $query->where('company_id', $user->company_id);
         }
+
+        if (!$canManageAllCompanies && !$this->hasPermission($request, 'can_manage_company', $user->company_id)) {
+            $query->where('requester_id', $user->id);
+        }
+
         $requisitions = $query->orderByDesc('created_at')->paginate(20);
         return response()->json([
             'status' => 'success',
@@ -213,14 +248,27 @@ class RequisitionController extends Controller
         ]);
     }
 
-    // Get a single requisition
-    public function show($id)
+    // Get a single requisition - same scoping as index() above.
+    public function show(Request $request, $id)
     {
-        $user = request()->user();
+        $user = $request->user();
+        if (!$this->hasPermission($request, 'can_view_requisitions')) {
+            return response()->json([
+                'status' => 'failed',
+                'message' => 'Unauthorized to view requisitions.'
+            ], 403);
+        }
+
+        $canManageAllCompanies = $this->canManageAllCompanies($request);
+        $canManageCompany = $this->hasPermission($request, 'can_manage_company', $user->company_id);
+
         $requisition = Requisition::with(['items.product', 'items.variant', 'requester', 'company', 'approver'])
             ->where('id', $id)
-            ->when(!$this->hasPermission(request(), 'can_manage_all_requisitions'), function ($q) use ($user) {
+            ->when(!$canManageAllCompanies, function ($q) use ($user) {
                 $q->where('company_id', $user->company_id);
+            })
+            ->when(!$canManageAllCompanies && !$canManageCompany, function ($q) use ($user) {
+                $q->where('requester_id', $user->id);
             })
             ->first();
         if (!$requisition) {
@@ -228,13 +276,6 @@ class RequisitionController extends Controller
                 'status' => 'failed',
                 'message' => 'Requisition not found or not accessible.'
             ], 404);
-        }
-        $companyId = $requisition->company_id;
-        if (!$this->hasPermission(request(), 'can_view_requisitions') || !$this->canManageCompany(request(), $companyId)) {
-            return response()->json([
-                'status' => 'failed',
-                'message' => 'Unauthorized to view this requisition.'
-            ], 403);
         }
         return response()->json([
             'status' => 'success',
@@ -273,11 +314,22 @@ class RequisitionController extends Controller
             'approver_id' => 'nullable|uuid|exists:users,id',
             'dispatch_id' => 'nullable|uuid|exists:dispatches,id',
             'items' => 'nullable|array|min:1',
-            'items.*.product_id' => 'required_with:items|uuid|exists:products,id',
+            'items.*.product_id' => 'nullable|uuid|exists:products,id',
+            'items.*.custom_item_name' => 'nullable|string|max:255',
             'items.*.variant_id' => 'nullable|uuid|exists:product_variants,id',
             'items.*.quantity' => 'required_with:items|integer|min:1',
             'items.*.notes' => 'nullable|string',
         ]);
+        $validator->after(function ($validator) use ($data) {
+            foreach (($data['items'] ?? []) as $index => $item) {
+                if (empty($item['product_id']) && empty($item['custom_item_name'])) {
+                    $validator->errors()->add(
+                        "items.$index",
+                        'Each item needs either a product or a custom item name.'
+                    );
+                }
+            }
+        });
         if ($validator->fails()) {
             $firstError = $validator->errors()->first();
             return response()->json([
@@ -315,7 +367,8 @@ class RequisitionController extends Controller
                     RequisitionItem::create([
                         'id' => (string) Str::uuid(),
                         'requisition_id' => $requisition->id,
-                        'product_id' => $item['product_id'],
+                        'product_id' => $item['product_id'] ?? null,
+                        'custom_item_name' => $item['custom_item_name'] ?? null,
                         'variant_id' => $item['variant_id'] ?? null,
                         'quantity' => $item['quantity'],
                         'notes' => $item['notes'] ?? null,

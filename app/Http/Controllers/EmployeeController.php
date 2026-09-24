@@ -253,6 +253,30 @@ class EmployeeController extends Controller
             ], 400);
         }
 
+        // Compensation is a decision for GM/Director (can_manage_company) or
+        // can_approve_salary_changes specifically - can_update_employees alone
+        // (which covers the rest of the record: name, address, status, etc.)
+        // isn't enough to change what someone gets paid.
+        $salaryFields = ['basic_salary', 'hourly_rate', 'payment_frequency', 'allowances', 'deductions'];
+        $changingSalary = collect($salaryFields)->contains(function ($field) use ($request, $employee) {
+            if (!$request->has($field)) {
+                return false;
+            }
+            $new = $request->input($field);
+            $current = $employee->{$field};
+            if (is_array($new) || is_array($current)) {
+                return json_encode($new) !== json_encode($current);
+            }
+            return (string) $new !== (string) $current;
+        });
+
+        if ($changingSalary && !$this->hasPermission($request, 'can_approve_salary_changes', $employee->company_id)) {
+            return response()->json([
+                'status' => 'failed',
+                'message' => 'Unauthorized to change compensation for this employee.',
+            ], 403);
+        }
+
         try {
             DB::beginTransaction();
 

@@ -2,9 +2,12 @@
 
 namespace App\Http\Controllers;
 
+use App\Models\DailyWorkReport;
 use App\Models\Employee;
 use App\Models\LeaveRequest;
 use App\Models\SalaryAdvance;
+use App\Models\User;
+use Carbon\Carbon;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Str;
 use Illuminate\Http\Request;
@@ -146,6 +149,139 @@ class EmployeeSelfServiceController extends Controller
         ], 201);
     }
 
+    public function dailyReportIndex(Request $request)
+    {
+        $employee = $this->resolveEmployee($request);
+        if (!$employee) {
+            return response()->json(['status' => 'failed', 'message' => 'No employee profile is linked to this login.'], 404);
+        }
+
+        $query = DailyWorkReport::with(['approver', 'approvedBy'])
+            ->where('company_id', $employee->company_id)
+            ->where('employee_id', $employee->id);
+
+        if ($request->filled('status')) {
+            $query->where('status', $request->input('status'));
+        }
+
+        $reports = $query->orderByDesc('report_date')->get()
+            ->map(fn ($r) => (new DailyWorkReportController())->formatReport($r));
+
+        return response()->json([
+            'status' => 'success',
+            'daily_reports' => $reports,
+        ]);
+    }
+
+    public function dailyReportStore(Request $request)
+    {
+        $employee = $this->resolveEmployee($request);
+        if (!$employee) {
+            return response()->json(['status' => 'failed', 'message' => 'No employee profile is linked to this login.'], 404);
+        }
+
+        $validator = Validator::make($request->all(), [
+            'report_date' => [
+                'required',
+                'date',
+                function ($attribute, $value, $fail) {
+                    if (Carbon::parse($value)->isSunday()) {
+                        $fail('Daily work reports are not required on Sundays - the reporting day is skipped.');
+                    }
+                },
+            ],
+            'designation' => 'nullable|string',
+            'department' => 'nullable|string',
+            'entries' => 'nullable|array',
+            'entries.*.time' => 'nullable|string',
+            'entries.*.activity' => 'nullable|string',
+            'entries.*.remarks' => 'nullable|string',
+            'key_achievements' => 'nullable|string',
+            'pending_work' => 'nullable|string',
+        ]);
+
+        if ($validator->fails()) {
+            return response()->json(['status' => 'failed', 'message' => $validator->errors()], 422);
+        }
+
+        $alreadySubmitted = DailyWorkReport::where('employee_id', $employee->id)
+            ->where('report_date', $request->report_date)
+            ->exists();
+
+        if ($alreadySubmitted) {
+            return response()->json([
+                'status' => 'failed',
+                'message' => 'A daily work report has already been submitted for this date.',
+            ], 422);
+        }
+
+        $user = $request->user();
+        $routing = $this->resolveDailyReportApprover($employee, $user);
+
+        $report = DailyWorkReport::create([
+            'company_id' => $employee->company_id,
+            'employee_id' => $employee->id,
+            'report_date' => $request->report_date,
+            'designation' => $request->input('designation') ?: $employee->position,
+            'department' => $request->input('department') ?: $employee->department,
+            'entries' => $request->input('entries', []),
+            'key_achievements' => $request->input('key_achievements'),
+            'pending_work' => $request->input('pending_work'),
+            'status' => $routing['auto_approve'] ? 'approved' : 'pending',
+            'approver_role' => $routing['role'],
+            'approver_id' => $routing['user_id'],
+            'approved_by' => $routing['auto_approve'] ? $user->id : null,
+            'approved_at' => $routing['auto_approve'] ? now() : null,
+            'created_by' => $user->id,
+        ]);
+        $report->load('approver', 'approvedBy');
+
+        return response()->json([
+            'status' => 'success',
+            'message' => 'Daily work report submitted successfully.',
+            'daily_report' => (new DailyWorkReportController())->formatReport($report),
+        ], 201);
+    }
+
+    /**
+     * Role-based routing for daily reports (unlike leave/salary, which use
+     * a fixed per-employee approver FK): a worker's report goes to GM, a
+     * GM's own report goes to the Managing Director ("Director" role).
+     * Director has nobody above them in this chain, so their own report is
+     * self-certified/auto-approved on submission rather than left pending
+     * forever. Falls back to whoever holds the can_manage_company/system
+     * bypass if no user literally holds the GM/Director role, same
+     * fallback resolveDefaultApproverId() uses for leave/salary.
+     */
+    private function resolveDailyReportApprover(Employee $employee, User $submittingUser): array
+    {
+        $submitterRole = optional($submittingUser->role)->name;
+
+        if ($submitterRole && strcasecmp($submitterRole, 'Director') === 0) {
+            return ['role' => null, 'user_id' => null, 'auto_approve' => true];
+        }
+
+        $requiredRole = ($submitterRole && strcasecmp($submitterRole, 'GM') === 0) ? 'Director' : 'GM';
+
+        $approverId = User::where('company_id', $employee->company_id)
+            ->where('id', '!=', $submittingUser->id)
+            ->whereRaw('is_active = true')
+            ->whereHas('role', fn ($q) => $q->where('name', $requiredRole))
+            ->orderBy('created_at')
+            ->value('id');
+
+        if (!$approverId) {
+            $approverId = User::where('company_id', $employee->company_id)
+                ->where('id', '!=', $submittingUser->id)
+                ->whereRaw('is_active = true')
+                ->whereHas('role.permissions', fn ($q) => $q->whereIn('key', ['can_manage_company', 'can_manage_system']))
+                ->orderBy('created_at')
+                ->value('id');
+        }
+
+        return ['role' => $requiredRole, 'user_id' => $approverId, 'auto_approve' => false];
+    }
+
     private function resolveEmployee(Request $request): ?Employee
     {
         $user = $request->user();
@@ -192,9 +328,8 @@ class EmployeeSelfServiceController extends Controller
         ];
 
         if ($this->hasEmployeeApproverColumns()) {
-            $defaultApproverId = $this->resolveDefaultApproverId($user->company_id, $user->id);
-            $payload['leave_approver_id'] = $defaultApproverId;
-            $payload['salary_advance_approver_id'] = $defaultApproverId;
+            $payload['leave_approver_id'] = $this->resolveDefaultApproverId($user->company_id, $user->id, 'can_approve_leave');
+            $payload['salary_advance_approver_id'] = $this->resolveDefaultApproverId($user->company_id, $user->id, 'can_approve_salary_changes');
         }
 
         return Employee::create($payload);
@@ -215,11 +350,36 @@ class EmployeeSelfServiceController extends Controller
         return $employeeNumber;
     }
 
-    private function resolveDefaultApproverId(string $companyId, string $currentUserId): ?string
+    /**
+     * The oldest active user who actually holds the given approval permission
+     * directly (i.e. really GM/Director, or explicitly granted approval
+     * rights) - preferred over a generic company-admin account that merely
+     * has the can_manage_company/can_manage_system blanket bypass, so a
+     * technical super_admin/citimax_admin signup account doesn't get picked
+     * ahead of the actual GM or Director. Only falls back to that bypass if
+     * the company has no dedicated approver at all.
+     */
+    private function resolveDefaultApproverId(string $companyId, string $currentUserId, string $permissionKey): ?string
     {
+        $direct = \App\Models\User::where('company_id', $companyId)
+            ->where('id', '!=', $currentUserId)
+            ->whereRaw('is_active = true')
+            ->whereHas('role.permissions', function ($q) use ($permissionKey) {
+                $q->where('key', $permissionKey);
+            })
+            ->orderBy('created_at')
+            ->value('id');
+
+        if ($direct) {
+            return $direct;
+        }
+
         return \App\Models\User::where('company_id', $companyId)
             ->where('id', '!=', $currentUserId)
             ->whereRaw('is_active = true')
+            ->whereHas('role.permissions', function ($q) {
+                $q->whereIn('key', ['can_manage_company', 'can_manage_system']);
+            })
             ->orderBy('created_at')
             ->value('id');
     }

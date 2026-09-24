@@ -44,7 +44,8 @@ class ReportController extends Controller
     {
         $companyId = $request->input('company_id', $request->user()->company_id);
 
-        if (!$this->hasPermission($request, 'can_view_reports', $companyId)) {
+        if (!$this->hasPermission($request, 'can_view_reports', $companyId)
+            && !$this->hasPermission($request, 'can_view_inventory_reports', $companyId)) {
             return response()->json(['status' => 'failed', 'message' => 'Unauthorized.'], 403);
         }
 
@@ -133,7 +134,8 @@ class ReportController extends Controller
     {
         $companyId = $request->input('company_id', $request->user()->company_id);
 
-        if (!$this->hasPermission($request, 'can_view_reports', $companyId)) {
+        if (!$this->hasPermission($request, 'can_view_reports', $companyId)
+            && !$this->hasPermission($request, 'can_view_logistics_reports', $companyId)) {
             return response()->json(['status' => 'failed', 'message' => 'Unauthorized.'], 403);
         }
 

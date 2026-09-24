@@ -173,7 +173,7 @@ class CustomerAccountController extends Controller
             'documents.*.other_information' => 'nullable|string',
             // Files: document_images[]
             'document_images' => 'nullable|array',
-            'document_images.*' => 'nullable|file|max:5120',
+            'document_images.*' => 'nullable|file|max:15360',
         ]);
 
         if ($validator->fails()) {
@@ -276,6 +276,8 @@ class CustomerAccountController extends Controller
             'currently_defaulted' => 'nullable|boolean',
             'credit_terms' => 'nullable|string|max:255',
             'notes' => 'nullable|string',
+            'reviewed_by_name' => 'nullable|string|max:255',
+            'reviewed_by_position' => 'nullable|string|max:255',
             // Multiple documents: array of metadata for update
             'documents' => 'nullable|array',
             'documents.*.id' => 'nullable|string|exists:documents,id',
@@ -286,7 +288,7 @@ class CustomerAccountController extends Controller
             'documents.*.other_information' => 'nullable|string',
             // Files: document_images[]
             'document_images' => 'nullable|array',
-            'document_images.*' => 'nullable|file|max:5120',
+            'document_images.*' => 'nullable|file|max:15360',
         ]);
 
         if ($validator->fails()) {
@@ -313,6 +315,8 @@ class CustomerAccountController extends Controller
                 'currently_defaulted' => $request->input('currently_defaulted', $account->currently_defaulted),
                 'credit_terms' => $request->input('credit_terms', $account->credit_terms),
                 'notes' => $request->input('notes', $account->notes),
+                'reviewed_by_name' => $request->input('reviewed_by_name', $account->reviewed_by_name),
+                'reviewed_by_position' => $request->input('reviewed_by_position', $account->reviewed_by_position),
             ])->save();
 
             // Update Directors

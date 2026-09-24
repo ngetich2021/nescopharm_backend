@@ -126,6 +126,7 @@ class QuoteController extends Controller
             'items.*.unit_id' => 'nullable|uuid|exists:product_packaging_units,id',
             'items.*.quantity' => 'required|numeric|min:0.0001',
             'items.*.unit_price' => 'required|numeric|min:0|max:999999.99',
+            'items.*.price_label' => 'nullable|string|max:100',
         ]);
 
         if ($validator->fails()) {
@@ -352,6 +353,7 @@ class QuoteController extends Controller
                     'company_id' => $user->company_id,
                     'submitted_by_id' => $isRepSubmission ? $user->id : null,
                     'submitted_at' => $isRepSubmission ? now() : null,
+                    'original_submitted_by_id' => $isRepSubmission ? $user->id : null,
                     'total_amount' => $totalAmount,
                     'discount' => $discount,
                     'final_amount' => $finalAmount,
@@ -396,6 +398,7 @@ class QuoteController extends Controller
                         'base_quantity' => $baseQuantity,
                         'packaging_breakdown' => $packagingBreakdown,
                         'unit_price' => $item['unit_price'],
+                        'price_label' => $item['price_label'] ?? null,
                         'total_price' => $item['quantity'] * $item['unit_price'],
                         'company_id' => $user->company_id,
                     ]);
@@ -442,6 +445,7 @@ class QuoteController extends Controller
             'status' => 'sometimes|required|string|in:pending,accepted,rejected',
             'valid_until' => 'sometimes|required|date|after:today',
             'notes' => 'nullable|string',
+            'discount' => 'sometimes|numeric|min:0|max:999999.99',
             'items' => 'sometimes|required|array|min:1',
             'items.*.id' => 'nullable|uuid|exists:quote_items,id',
             'items.*.product_id' => 'required|uuid|exists:products,id',
@@ -449,6 +453,7 @@ class QuoteController extends Controller
             'items.*.unit_id' => 'nullable|uuid|exists:product_packaging_units,id',
             'items.*.quantity' => 'required|numeric|min:0.0001',
             'items.*.unit_price' => 'required|numeric|min:0|max:999999.99',
+            'items.*.price_label' => 'nullable|string|max:100',
         ]);
 
         if ($validator->fails()) {
@@ -491,11 +496,23 @@ class QuoteController extends Controller
                 ]);
 
                 // Once a can_update_quotes-authorized user edits a rep-submitted
-                // quote (see store(), where submitted_by_id is stamped), it
-                // becomes a fully normal quote - clear the "from rep" flag.
+                // quote (see store(), where submitted_by_id is stamped), it's no
+                // longer "new and unreviewed" - clear that flag so the "From:
+                // rep - Needs Review" badge stops showing.
                 if ($quote->submitted_by_id) {
                     $quote->submitted_by_id = null;
                     $quote->submitted_at = null;
+                }
+
+                // If this quote originated from a rep in POS and isn't already a
+                // terminal state, staff editing it (e.g. adjusting prices/discounts)
+                // is the "send back to the rep" step: route it to awaiting_rep_confirm
+                // so the rep can review the new pricing and confirm or push back,
+                // unless staff explicitly rejected/expired it outright.
+                $explicitStatus = $request->input('status');
+                $isTerminalDecision = in_array($explicitStatus, ['rejected', 'expired'], true);
+                if ($quote->original_submitted_by_id && $quote->status !== 'accepted' && !$isTerminalDecision) {
+                    $quote->status = 'awaiting_rep_confirm';
                 }
 
                 // Handle quote items if provided
@@ -593,6 +610,7 @@ class QuoteController extends Controller
                                     'base_quantity' => $baseQuantity,
                                     'packaging_breakdown' => $packagingBreakdown,
                                     'unit_price' => $item['unit_price'],
+                                    'price_label' => $item['price_label'] ?? null,
                                     'total_price' => $item['quantity'] * $item['unit_price'],
                                 ]);
                                 $existingItemIds[] = $item['id'];
@@ -609,6 +627,7 @@ class QuoteController extends Controller
                                 'base_quantity' => $baseQuantity,
                                 'packaging_breakdown' => $packagingBreakdown,
                                 'unit_price' => $item['unit_price'],
+                                'price_label' => $item['price_label'] ?? null,
                                 'total_price' => $item['quantity'] * $item['unit_price'],
                                 'company_id' => $quote->company_id,
                             ]);
@@ -621,8 +640,14 @@ class QuoteController extends Controller
                         ->whereNotIn('id', $existingItemIds)
                         ->delete();
 
-                    // Update total amount
+                    // Update total amount - final_amount must be recalculated
+                    // alongside it, or editing a quote's prices leaves the
+                    // displayed total stuck at whatever it was before the
+                    // edit (total_amount changes, final_amount silently
+                    // doesn't, and every table/summary reads final_amount).
                     $quote->total_amount = $totalAmount;
+                    $quote->discount = $request->input('discount', $quote->discount);
+                    $quote->final_amount = $totalAmount - $quote->discount;
                 }
 
                 $quote->save();
@@ -696,7 +721,25 @@ class QuoteController extends Controller
 
         try {
             return DB::transaction(function () use ($request, $quote) {
-                $user = $request->user();
+                return $this->performConvertToOrder($request, $quote);
+            });
+        } catch (\Exception $e) {
+            Log::error('Failed to convert quote to order', ['error' => $e->getMessage()]);
+            return response()->json([
+                'status' => 'failed',
+                'message' => 'Failed to convert quote to order: ' . $e->getMessage(),
+            ], 500);
+        }
+    }
+
+    /**
+     * Shared order-creation body for both the staff-initiated convertToOrder()
+     * and the rep-initiated confirm() endpoints. Must be called inside a
+     * DB::transaction() by the caller.
+     */
+    protected function performConvertToOrder(Request $request, Quote $quote)
+    {
+        $user = $request->user();
 
                 // Validate delivery location if provided
                 $deliveryLocationId = $request->input('delivery_location_id');
@@ -749,12 +792,37 @@ class QuoteController extends Controller
                     );
                 }
 
+                // Enforce the customer's credit limit when converting on credit -
+                // this was the actual gap: nothing previously checked how much of
+                // the limit was already used, so a fully-exhausted (or 0-limit)
+                // customer could still have quotes converted into real orders.
+                // Skipped entirely for an explicit "instant" choice, since that
+                // isn't extending credit at all.
+                if ($orderCredit['payment_type'] === 'credit' && $quote->customer) {
+                    $availableCredit = $this->creditTermsResolver->getAvailableCredit($quote->customer);
+                    if ($availableCredit !== null && (float) $quote->total_amount > $availableCredit) {
+                        return response()->json([
+                            'status' => 'failed',
+                            'message' => sprintf(
+                                "This customer's available credit (KES %s) is not enough to cover this order (KES %s). Choose \"Pay Instant\" to proceed without using their credit limit, or increase their credit limit first.",
+                                number_format($availableCredit, 2),
+                                number_format((float) $quote->total_amount, 2)
+                            ),
+                        ], 422);
+                    }
+                }
+
                 // Create order
                 $order = Order::create([
                     'id' => (string) Str::uuid(),
                     'order_number' => $orderNumber,
                     'customer_id' => $quote->customer_id,
-                    'sales_rep_id' => $request->input('sales_rep_id'),
+                    // Falls back to whoever originally submitted the quote (the
+                    // rep) so orders converted from a rep's POS quote are
+                    // attributed to them for their own "my orders" history,
+                    // even though the confirm() request itself never passes
+                    // sales_rep_id explicitly.
+                    'sales_rep_id' => $request->input('sales_rep_id') ?: $quote->original_submitted_by_id,
                     'payment_type' => $orderCredit['payment_type'],
                     'credit_terms_days' => $orderCredit['credit_terms_days'],
                     'total_amount' => $quote->total_amount,
@@ -825,20 +893,119 @@ class QuoteController extends Controller
                         'deliveryDetails'
                     ]),
                 ], 201);
-            });
-        } catch (\Exception $e) {
-            Log::error('Failed to convert quote to order', ['error' => $e->getMessage()]);
+    }
+
+    /**
+     * A rep confirms their own quote (originally submitted from POS, then
+     * priced/adjusted by staff) and it becomes a real order. Authorized by
+     * ownership of the quote, not by can_create_orders - reps don't have
+     * that permission, and shouldn't need it just to finalize their own
+     * already-reviewed quote.
+     */
+    public function confirm(Request $request, $quoteId)
+    {
+        $user = $request->user();
+        $quote = Quote::with(['quoteItems.product', 'customer'])->find($quoteId);
+
+        if (!$quote) {
             return response()->json([
                 'status' => 'failed',
-                'message' => 'Failed to convert quote to order: ' . $e->getMessage(),
+                'message' => 'Quote not found.',
+            ], 404);
+        }
+
+        if (!$quote->original_submitted_by_id || $quote->original_submitted_by_id !== $user->id || $quote->company_id !== $user->company_id) {
+            return response()->json([
+                'status' => 'failed',
+                'message' => 'You can only confirm quotes you originally submitted.',
+            ], 403);
+        }
+
+        if ($quote->status !== 'awaiting_rep_confirm') {
+            return response()->json([
+                'status' => 'failed',
+                'message' => 'This quote is not currently awaiting your confirmation.',
+            ], 400);
+        }
+
+        try {
+            return DB::transaction(function () use ($request, $quote) {
+                return $this->performConvertToOrder($request, $quote);
+            });
+        } catch (\Exception $e) {
+            Log::error('Failed to confirm quote', ['error' => $e->getMessage()]);
+            return response()->json([
+                'status' => 'failed',
+                'message' => 'Failed to confirm quote: ' . $e->getMessage(),
             ], 500);
         }
+    }
+
+    /**
+     * A rep sends their reviewed-and-adjusted quote back to staff for further
+     * changes instead of confirming it, with an optional note about what
+     * needs adjusting.
+     */
+    public function requestChanges(Request $request, $quoteId)
+    {
+        $validator = Validator::make($request->all(), [
+            'note' => 'nullable|string|max:2000',
+        ]);
+        if ($validator->fails()) {
+            return response()->json([
+                'status' => 'failed',
+                'message' => $validator->errors(),
+            ], 400);
+        }
+
+        $user = $request->user();
+        $quote = Quote::find($quoteId);
+
+        if (!$quote) {
+            return response()->json([
+                'status' => 'failed',
+                'message' => 'Quote not found.',
+            ], 404);
+        }
+
+        if (!$quote->original_submitted_by_id || $quote->original_submitted_by_id !== $user->id || $quote->company_id !== $user->company_id) {
+            return response()->json([
+                'status' => 'failed',
+                'message' => 'You can only request changes on quotes you originally submitted.',
+            ], 403);
+        }
+
+        if ($quote->status !== 'awaiting_rep_confirm') {
+            return response()->json([
+                'status' => 'failed',
+                'message' => 'This quote is not currently awaiting your confirmation.',
+            ], 400);
+        }
+
+        $note = $request->input('note');
+        $quote->status = 'pending';
+        $quote->submitted_by_id = $user->id;
+        $quote->submitted_at = now();
+        if ($note) {
+            $quote->notes = trim(($quote->notes ? $quote->notes . "\n" : '') . "Rep requested changes: {$note}");
+        }
+        $quote->save();
+
+        return response()->json([
+            'status' => 'success',
+            'message' => 'Changes requested. Quote sent back for review.',
+            'quote' => $quote,
+        ], 200);
     }
 
     public function index(Request $request)
     {
         $user = $request->user();
-        if (!$this->hasPermission($request, 'can_view_quotes', $user->company_id)) {
+        // A rep listing only their own submitted quotes (?mine=1) doesn't need
+        // can_view_quotes - they're not browsing the company's quotes, just
+        // tracking what they personally submitted from POS.
+        $mine = $request->boolean('mine');
+        if (!$mine && !$this->hasPermission($request, 'can_view_quotes', $user->company_id)) {
             return response()->json([
                 'status' => 'failed',
                 'message' => 'Unauthorized to view quotes.',
@@ -846,18 +1013,25 @@ class QuoteController extends Controller
         }
 
         try {
-            return $this->executeWithRetry(function() use ($request) {
+            return $this->executeWithRetry(function() use ($request, $mine) {
                 $user = $request->user();
                 $query = Quote::with([
                     'customer' => function ($query) {
                         $query->select('id', 'name', 'email', 'phone');
                     },
                     'submittedBy' => function ($query) {
-                        $query->select('id', 'name');
+                        // users has no `name` column (first_name/last_name only,
+                        // with `full_name` as a computed accessor) - selecting
+                        // a bare `name` here 500'd every listing that included
+                        // a rep-submitted quote still carrying submitted_by_id.
+                        $query->select('id', 'first_name', 'last_name');
                     },
                 ]);
 
-                if (!$this->hasPermission($request, 'can_manage_all_quotes')) {
+                if ($mine) {
+                    $query->where('company_id', $user->company_id)
+                        ->where('original_submitted_by_id', $user->id);
+                } elseif (!$this->hasPermission($request, 'can_manage_all_quotes')) {
                     $query->where('company_id', $user->company_id);
                 } else {
                     if ($request->filled('company_id')) {
@@ -887,7 +1061,7 @@ class QuoteController extends Controller
                 }
 
                 $perPage = (int) $request->input('per_page', 20);
-                $quotes = $query->select('id', 'customer_id', 'company_id', 'quote_number', 'total_amount', 'final_amount', 'status', 'valid_until', 'submitted_by_id', 'submitted_at', 'created_at', 'updated_at')
+                $quotes = $query->select('id', 'customer_id', 'company_id', 'quote_number', 'total_amount', 'final_amount', 'status', 'valid_until', 'submitted_by_id', 'submitted_at', 'original_submitted_by_id', 'created_at', 'updated_at')
                     ->orderBy('created_at', 'desc')
                     ->paginate($perPage);
 
@@ -920,13 +1094,13 @@ class QuoteController extends Controller
                         $query->select('id', 'name', 'email', 'phone');
                     },
                     'submittedBy' => function ($query) {
-                        $query->select('id', 'name');
+                        $query->select('id', 'first_name', 'last_name');
                     },
                     'deliveryLocation' => function ($query) {
                         $query->select('*');
                     },
                     'quoteItems' => function ($query) {
-                        $query->select('id', 'quote_id', 'product_id', 'variant_id', 'unit_id', 'quantity', 'unit_quantity', 'base_quantity', 'packaging_breakdown', 'unit_price', 'total_price')
+                        $query->select('id', 'quote_id', 'product_id', 'variant_id', 'unit_id', 'quantity', 'unit_quantity', 'base_quantity', 'packaging_breakdown', 'unit_price', 'price_label', 'total_price')
                             ->with([
                                 'product' => function ($query) {
                                     $query->select('id', 'name', 'price', 'store_id', 'has_packaging', 'base_unit')
@@ -952,7 +1126,7 @@ class QuoteController extends Controller
                     'quoteNotes' => function ($query) {
                         $query->select('id', 'quote_id', 'note_content', 'created_by', 'created_at')
                             ->with(['creator' => function ($query) {
-                                $query->select('id', 'name');
+                                $query->select('id', 'first_name', 'last_name');
                             }])
                             ->orderBy('created_at', 'desc');
                     }

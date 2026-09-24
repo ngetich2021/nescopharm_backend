@@ -150,7 +150,23 @@ class SalaryAdvanceController extends Controller
             return response()->json(['status' => 'failed', 'message' => $validator->errors()], 422);
         }
 
-        $advance->update($request->only(['employee_id', 'amount', 'request_date', 'reason', 'status']));
+        $updateData = $request->only(['employee_id', 'amount', 'request_date', 'reason', 'status']);
+
+        // Same gap as LeaveController::update() had - approving/rejecting is a
+        // decision for the assigned approver or GM/Director
+        // (can_approve_salary_changes/can_manage_company), not just anyone
+        // with menu access to this generic edit endpoint.
+        if ($request->filled('status') && in_array($request->input('status'), ['approved', 'rejected']) && $request->input('status') !== $advance->status) {
+            $advance->loadMissing('employee');
+            $isAssignedApprover = optional($advance->employee)->salary_advance_approver_id === $request->user()->id;
+            if (!$this->hasPermission($request, 'can_approve_salary_changes', $advance->company_id) && !$isAssignedApprover) {
+                return response()->json(['status' => 'failed', 'message' => 'Unauthorized to approve or reject this salary advance.'], 403);
+            }
+            $updateData['approved_by'] = $request->user()->id;
+            $updateData['approved_at'] = now();
+        }
+
+        $advance->update($updateData);
         $advance->load('employee');
 
         return response()->json([
@@ -187,7 +203,7 @@ class SalaryAdvanceController extends Controller
         $advance->loadMissing('employee');
         $isAssignedApprover = optional($advance->employee)->salary_advance_approver_id === $request->user()->id;
 
-        if (!$this->hasPermission($request, 'can_manage_company', $advance->company_id) && !$isAssignedApprover) {
+        if (!$this->hasPermission($request, 'can_approve_salary_changes', $advance->company_id) && !$isAssignedApprover) {
             return response()->json(['status' => 'failed', 'message' => 'Unauthorized.'], 403);
         }
 

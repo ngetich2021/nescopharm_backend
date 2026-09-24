@@ -118,6 +118,15 @@ class CustomerApprovalController extends Controller
         $validator = Validator::make($request->all(), [
             'status' => 'required|in:approved,rejected',
             'notes' => 'nullable|string',
+            // Stage 1 approval only - lets the approver adjust the credit
+            // terms they're actually agreeing to grant (which may differ
+            // from what the rep originally requested) before the
+            // CustomerAccount is created from them.
+            'annual_turnover' => 'nullable|numeric|min:0',
+            'credit_required' => 'nullable|numeric|min:0',
+            'credit_period_required' => 'nullable|string|max:100',
+            'credit_period_pd_cheque_days' => 'nullable|integer|min:0|max:365',
+            'credit_days' => 'nullable|integer|min:0|max:365',
         ]);
         if ($validator->fails()) {
             return response()->json(['status' => 'failed', 'message' => $validator->errors()], 400);
@@ -167,6 +176,15 @@ class CustomerApprovalController extends Controller
                 $customer->save();
             } elseif ($stage === 'stage1') {
                 $pending = $customer->pending_credit_application ?? [];
+                // Approver's overrides win over what the rep originally
+                // submitted - only fields actually sent in this request are
+                // replaced, everything else (directors, suppliers, bank
+                // details) still comes from the rep's submission.
+                foreach (['annual_turnover', 'credit_required', 'credit_period_required', 'credit_period_pd_cheque_days', 'credit_days'] as $field) {
+                    if ($request->filled($field)) {
+                        $pending[$field] = $request->input($field);
+                    }
+                }
                 $this->createAccountFromData($customer->id, $customer->company_id, $user->id, $pending);
                 $customer->refresh();
                 $customer->approval_status = 'pending_documents';
@@ -214,7 +232,10 @@ class CustomerApprovalController extends Controller
         }
 
         $validator = Validator::make($request->all(), [
-            'file' => 'required|file|max:5120',
+            // Client compresses images before upload, but PDFs and other
+            // scans pass through uncompressed - give real headroom instead
+            // of a tight 5MB cap that photos routinely blew past.
+            'file' => 'required|file|max:15360',
         ]);
         if ($validator->fails()) {
             return response()->json(['status' => 'failed', 'message' => $validator->errors()], 400);
@@ -253,6 +274,70 @@ class CustomerApprovalController extends Controller
             return response()->json([
                 'status' => 'failed',
                 'message' => 'Failed to upload signed credit application: ' . $e->getMessage(),
+            ], 500);
+        }
+    }
+
+    /**
+     * Upload the GM/approver's own company-stamped copy of the credit
+     * application - a separate record from the rep's customer-signed scan
+     * (uploadSignedApplication above). Purely a record-keeping attachment:
+     * it does not gate or change approval_status, since the approve/reject
+     * decision itself never requires a signature or stamp to be uploaded.
+     */
+    public function uploadStampedApplication(Request $request, $customerId)
+    {
+        $user = $request->user();
+        $customer = Customer::find($customerId);
+        if (!$customer) {
+            return response()->json(['status' => 'failed', 'message' => 'Customer not found.'], 404);
+        }
+        if (!$this->hasPermission($request, 'can_approve_account', $customer->company_id)) {
+            return response()->json(['status' => 'failed', 'message' => 'Unauthorized.'], 403);
+        }
+        if (!in_array($customer->approval_status, ['pending_stage2', 'approved'], true)) {
+            return response()->json([
+                'status' => 'failed',
+                'message' => "Customer is not at a stage where a stamped copy can be uploaded (status: {$customer->approval_status}).",
+            ], 400);
+        }
+
+        $validator = Validator::make($request->all(), [
+            'file' => 'required|file|max:15360',
+        ]);
+        if ($validator->fails()) {
+            return response()->json(['status' => 'failed', 'message' => $validator->errors()], 400);
+        }
+
+        try {
+            $file = $request->file('file');
+            $path = 'documents/' . date('Y/m/d') . '/' . Str::uuid() . '.' . $file->getClientOriginalExtension();
+            $stored = Storage::disk($this->disk)->put($path, file_get_contents($file->getRealPath()));
+            if (!$stored) {
+                throw new \Exception('Failed to store the uploaded file.');
+            }
+
+            $document = Document::create([
+                'id' => (string) Str::uuid(),
+                'document_name' => 'Company-Stamped Credit Application',
+                'document_number' => $this->generateDocumentNumber($customer->company_id),
+                'document_image' => $path,
+                'documentable_type' => Customer::class,
+                'documentable_id' => $customer->id,
+                'company_id' => $customer->company_id,
+                'created_by' => $user->id,
+            ]);
+
+            return response()->json([
+                'status' => 'success',
+                'message' => 'Company-stamped credit application uploaded.',
+                'document' => array_merge($document->toArray(), ['url' => $this->getStorageUrl($path)]),
+            ], 201);
+        } catch (\Exception $e) {
+            Log::error('Failed to upload stamped credit application', ['customer_id' => $customerId, 'error' => $e->getMessage()]);
+            return response()->json([
+                'status' => 'failed',
+                'message' => 'Failed to upload stamped credit application: ' . $e->getMessage(),
             ], 500);
         }
     }

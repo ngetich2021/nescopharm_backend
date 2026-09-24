@@ -113,7 +113,11 @@ class OrderController extends Controller
     public function index(Request $request)
     {
         $user = $request->user();
-        if (!$this->hasPermission($request, 'can_view_orders', $user->company_id)) {
+        // A rep listing only their own orders (?mine=1) doesn't need
+        // can_view_orders - they're not browsing the company's orders, just
+        // tracking their own past sales (e.g. the POS "Orders" tab).
+        $mine = $request->boolean('mine');
+        if (!$mine && !$this->hasPermission($request, 'can_view_orders', $user->company_id)) {
             return response()->json([
                 'status' => 'failed',
                 'message' => 'Unauthorized to view orders.',
@@ -121,7 +125,7 @@ class OrderController extends Controller
         }
 
         try {
-            return $this->executeWithRetry(function () use ($request) {
+            return $this->executeWithRetry(function () use ($request, $mine) {
                 $user = $request->user();
                 $query = Order::with([
                     'customer' => function ($query) {
@@ -129,7 +133,10 @@ class OrderController extends Controller
                     }
                 ]);
 
-                if (!$this->hasPermission($request, 'can_manage_all_quotes')) {
+                if ($mine) {
+                    $query->where('company_id', $user->company_id)
+                        ->where('sales_rep_id', $user->id);
+                } elseif (!$this->hasPermission($request, 'can_manage_all_quotes')) {
                     $query->where('company_id', $user->company_id);
                 } else {
                     if ($request->filled('company_id')) {
@@ -186,7 +193,7 @@ class OrderController extends Controller
                         $query->select('*');
                     },
                     'orderItems' => function ($query) {
-                        $query->select('id', 'order_id', 'product_id', 'variant_id', 'quantity', 'base_quantity', 'packaging_breakdown', 'unit_price', 'total_price')
+                        $query->select('id', 'order_id', 'product_id', 'variant_id', 'quantity', 'base_quantity', 'packaging_breakdown', 'unit_price', 'price_label', 'total_price')
                             ->with([
                                 'product' => function ($query) {
                                     $query->select('id', 'name', 'price', 'store_id', 'has_packaging', 'base_unit', 'tax_rate', 'is_taxable')
@@ -263,6 +270,7 @@ class OrderController extends Controller
             'items.*.variant_id' => 'nullable|uuid|exists:product_variants,id',
             'items.*.quantity' => 'required|numeric|min:0.0001',
             'items.*.unit_price' => 'required|numeric|min:0|max:999999.99',
+            'items.*.price_label' => 'nullable|string|max:100',
             'order_date' => 'nullable|date',
         ]);
 
@@ -556,6 +564,7 @@ class OrderController extends Controller
                         'packaging_breakdown' => $packagingBreakdown,
                         'batch_allocations' => $batchAllocations,
                         'unit_price' => $unitPrice,
+                        'price_label' => $item['price_label'] ?? null,
                         'total_price' => $baseQuantity * $unitPrice,
                         'tax_rate' => $product->is_taxable ? ($product->tax_rate ?? 0) : 0,
                         'tax_amount' => ($unitPrice * $baseQuantity * ($product->is_taxable ? ($product->tax_rate ?? 0) : 0)) / 100,
@@ -651,6 +660,7 @@ class OrderController extends Controller
             'items.*.variant_id' => 'nullable|uuid|exists:product_variants,id',
             'items.*.quantity' => 'required_with:items|integer|min:1',
             'items.*.unit_price' => 'required_with:items|numeric|min:0|max:999999.99',
+            'items.*.price_label' => 'nullable|string|max:100',
             'order_date' => 'nullable|date',
         ]);
 
@@ -816,6 +826,7 @@ class OrderController extends Controller
                             'quantity' => $item['quantity'],
                             'batch_allocations' => $batchAllocations,
                             'unit_price' => $item['unit_price'],
+                            'price_label' => $item['price_label'] ?? null,
                             'total_price' => $item['quantity'] * $item['unit_price'],
                             'tax_rate' => $product->is_taxable ? ($product->tax_rate ?? 0) : 0,
                             'tax_amount' => ($item['unit_price'] * $item['quantity'] * ($product->is_taxable ? ($product->tax_rate ?? 0) : 0)) / 100,

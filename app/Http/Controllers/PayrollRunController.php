@@ -221,10 +221,13 @@ class PayrollRunController extends Controller
     // POST /payroll-runs/{id}/process
     // -------------------------------------------------------------------------
 
-    public function process(string $id): JsonResponse
+    public function process(Request $request, string $id): JsonResponse
     {
         try {
             $run = PayrollRun::findOrFail($id);
+            if (!$this->hasPermission($request, 'can_create_payroll', $run->company_id)) {
+                return response()->json(['status' => 'failed', 'message' => 'Unauthorized.'], 403);
+            }
             $this->payrollService->processRun($run);
 
             return response()->json([
@@ -254,6 +257,9 @@ class PayrollRunController extends Controller
     {
         try {
             $run = PayrollRun::findOrFail($id);
+            if (!$this->hasPermission($request, 'can_approve_payroll', $run->company_id)) {
+                return response()->json(['status' => 'failed', 'message' => 'Unauthorized.'], 403);
+            }
             $this->payrollService->approveRun($run, $request->user()->id);
 
             return response()->json([
@@ -283,6 +289,9 @@ class PayrollRunController extends Controller
     {
         try {
             $run = PayrollRun::findOrFail($id);
+            if (!$this->hasPermission($request, 'can_process_payroll', $run->company_id)) {
+                return response()->json(['status' => 'failed', 'message' => 'Unauthorized.'], 403);
+            }
             $this->payrollService->markPaid($run, $request->user()->id);
 
             return response()->json([
@@ -592,6 +601,10 @@ class PayrollRunController extends Controller
         try {
             $run = PayrollRun::where('company_id', $request->user()->company_id)
                 ->findOrFail($runId);
+
+            if (!$this->hasPermission($request, 'can_update_payroll', $run->company_id)) {
+                return response()->json(['status' => 'failed', 'message' => 'Unauthorized.'], 403);
+            }
 
             if ($run->status !== 'draft') {
                 return response()->json([

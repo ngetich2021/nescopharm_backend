@@ -81,6 +81,7 @@ class Quote extends Model
         'customer_id',
         'submitted_by_id',
         'submitted_at',
+        'original_submitted_by_id',
         'total_amount',
         'status',
         'company_id',
@@ -116,6 +117,17 @@ class Quote extends Model
     public function submittedBy()
     {
         return $this->belongsTo(User::class, 'submitted_by_id');
+    }
+
+    /**
+     * The rep who originally submitted this quote from POS, if any. Unlike
+     * submitted_by_id (cleared on staff's first edit), this is stamped once
+     * at creation and kept forever, so the quote can always be routed back
+     * to its owner for the confirm/request-changes step.
+     */
+    public function originalSubmittedBy()
+    {
+        return $this->belongsTo(User::class, 'original_submitted_by_id');
     }
 
     public function customer()

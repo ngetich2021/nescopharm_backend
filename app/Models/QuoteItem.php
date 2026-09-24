@@ -24,6 +24,7 @@ class QuoteItem extends Model
         'base_quantity',
         'packaging_breakdown',
         'unit_price',
+        'price_label',
         'total_price',
         'company_id',
         'created_at',

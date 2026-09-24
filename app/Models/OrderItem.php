@@ -27,6 +27,7 @@ class OrderItem extends Model
         'packaging_breakdown',
         'batch_allocations',
         'unit_price',
+        'price_label',
         'total_price',
         'tax_rate',
         'tax_amount',

@@ -548,12 +548,30 @@ class UserController extends Controller
     /**
      * List users for the logged-in user's company (with permission checks)
      */
+    /**
+     * Permissions whose owner needs to browse the company user directory as
+     * part of their own workflow (picking an approver/driver/dispatcher on a
+     * requisition or order) even without full User Management rights.
+     */
+    protected const USER_BROWSING_WORKFLOW_PERMISSIONS = [
+        'can_view_users',
+        'can_create_requisitions',
+        'can_update_requisitions',
+        'can_approve_requisitions',
+        'can_create_orders',
+        'can_update_orders',
+        'can_dispatch_orders',
+    ];
+
     public function index(Request $request)
     {
         try {
             return $this->executeWithRetry(function () use ($request) {
                 $user = $request->user();
-                if (!$this->hasPermission($request, 'can_view_users', $user->company_id)) {
+                $canBrowseUsers = collect(self::USER_BROWSING_WORKFLOW_PERMISSIONS)
+                    ->contains(fn ($permission) => $this->hasPermission($request, $permission, $user->company_id));
+
+                if (!$canBrowseUsers) {
                     return response()->json([
                         'status' => 'failed',
                         'message' => 'Unauthorized to view users.',
@@ -606,6 +624,13 @@ class UserController extends Controller
                                 ->orWhereHas('role', function ($rq) {
                                     $rq->whereRaw('is_sales_rep = false');
                                 });
+                        });
+                    } elseif (str_starts_with($roleScope, 'can_')) {
+                        // A permission-key scope (e.g. "can_approve_requisitions") restricts
+                        // the list to users whose role actually holds that permission, plus
+                        // company/system admins who bypass every granular check anyway.
+                        $query->whereHas('role.permissions', function ($q) use ($roleScope) {
+                            $q->whereIn('key', [$roleScope, 'can_manage_company', 'can_manage_system']);
                         });
                     }
                 }

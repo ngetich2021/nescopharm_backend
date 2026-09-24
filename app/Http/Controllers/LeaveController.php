@@ -153,7 +153,25 @@ class LeaveController extends Controller
             return response()->json(['status' => 'failed', 'message' => $validator->errors()], 422);
         }
 
-        $leaveRequest->update($request->only(['employee_id', 'leave_type', 'start_date', 'end_date', 'reason', 'status']));
+        $updateData = $request->only(['employee_id', 'leave_type', 'start_date', 'end_date', 'reason', 'status']);
+
+        // Approving/rejecting is a decision for the assigned approver, or
+        // GM/Director (can_manage_company) / can_approve_leave - unlike the
+        // request's own details (dates, reason, type), which anyone with menu
+        // access can already edit above. Without this, this generic update
+        // endpoint let anyone with menu access silently approve/reject too,
+        // bypassing the stricter dedicated approve() endpoint below entirely.
+        if ($request->filled('status') && in_array($request->input('status'), ['approved', 'rejected']) && $request->input('status') !== $leaveRequest->status) {
+            $leaveRequest->loadMissing('employee');
+            $isAssignedApprover = optional($leaveRequest->employee)->leave_approver_id === $request->user()->id;
+            if (!$this->hasPermission($request, 'can_approve_leave', $leaveRequest->company_id) && !$isAssignedApprover) {
+                return response()->json(['status' => 'failed', 'message' => 'Unauthorized to approve or reject this leave request.'], 403);
+            }
+            $updateData['approved_by'] = $request->user()->id;
+            $updateData['approved_at'] = now();
+        }
+
+        $leaveRequest->update($updateData);
         $leaveRequest->load('employee');
 
         return response()->json([
@@ -190,7 +208,7 @@ class LeaveController extends Controller
         $leaveRequest->loadMissing('employee');
         $isAssignedApprover = optional($leaveRequest->employee)->leave_approver_id === $request->user()->id;
 
-        if (!$this->hasPermission($request, 'can_manage_company', $leaveRequest->company_id) && !$isAssignedApprover) {
+        if (!$this->hasPermission($request, 'can_approve_leave', $leaveRequest->company_id) && !$isAssignedApprover) {
             return response()->json(['status' => 'failed', 'message' => 'Unauthorized.'], 403);
         }
 

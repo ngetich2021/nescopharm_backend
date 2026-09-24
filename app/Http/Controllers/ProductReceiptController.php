@@ -116,7 +116,7 @@ class ProductReceiptController extends Controller
     {
         $user = $request->user();
         $companyId = $request->input('company_id', $user->company_id);
-        if (!$this->hasPermission($request, 'can_manage_system') && !$this->hasPermission($request, 'can_manage_company', $companyId)) {
+        if (!$this->hasPermission($request, 'can_view_product_receipts', $companyId)) {
             return response()->json([
                 'status' => 'failed',
                 'message' => 'Unauthorized to view product receipts.',
@@ -159,7 +159,7 @@ class ProductReceiptController extends Controller
             ], 404);
         }
         $companyId = $receipt->product ? $receipt->product->company_id : null;
-        if (!$this->hasPermission($request, 'can_manage_system') && !$this->hasPermission($request, 'can_manage_company', $companyId)) {
+        if (!$this->hasPermission($request, 'can_view_product_receipts', $companyId)) {
             return response()->json([
                 'status' => 'failed',
                 'message' => 'Unauthorized to view this product receipt.',
@@ -187,7 +187,7 @@ class ProductReceiptController extends Controller
     {
         $receipt = ProductReceipt::with('productReceiptItems')->findOrFail($id);
         $companyId = $receipt->company_id;
-        if (!$this->hasPermission($request, 'can_manage_system') && !$this->hasPermission($request, 'can_manage_company', $companyId)) {
+        if (!$this->hasPermission($request, 'can_update_product_receipts', $companyId)) {
             return response()->json([
                 'status' => 'failed',
                 'message' => 'Unauthorized to update this product receipt.',
@@ -494,7 +494,7 @@ class ProductReceiptController extends Controller
     {
         $receipt = ProductReceipt::findOrFail($id);
         $companyId = $receipt->product ? $receipt->product->company_id : null;
-        if (!$this->hasPermission($request, 'can_manage_system') && !$this->hasPermission($request, 'can_manage_company', $companyId)) {
+        if (!$this->hasPermission($request, 'can_delete_product_receipts', $companyId)) {
             return response()->json([
                 'status' => 'failed',
                 'message' => 'Unauthorized to delete this product receipt.',
@@ -519,7 +519,7 @@ class ProductReceiptController extends Controller
 
         $user = $request->user();
         $companyId = $request->input('company_id', $user->company_id);
-        if (!$this->hasPermission($request, 'can_manage_system') && !$this->hasPermission($request, 'can_manage_company', $companyId)) {
+        if (!$this->hasPermission($request, 'can_create_product_receipts', $companyId)) {
             return response()->json([
                 'status' => 'failed',
                 'message' => 'Unauthorized to create product receipts.',

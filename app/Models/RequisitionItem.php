@@ -18,6 +18,7 @@ class RequisitionItem extends Model
         'id',
         'requisition_id',
         'product_id',
+        'custom_item_name',
         'variant_id',
         'quantity',
         'notes',

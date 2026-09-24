@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers;
 
+use App\Models\Cheque;
 use App\Models\Invoice;
 use App\Models\InvoiceLineItem;
 use App\Models\Customer;
@@ -9,6 +10,7 @@ use App\Models\Logistic;
 use App\Models\Order;
 use App\Models\Payment;
 use App\Models\PaymentAllocation;
+use App\Models\PaymentRefund;
 use App\Models\Product;
 use App\Models\ProductVariant;
 use App\Services\AccountingWorkflowService;
@@ -19,6 +21,7 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Validator;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Mail;
+use Illuminate\Support\Str;
 use App\Http\Traits\HandlesDatabaseErrors;
 use App\Mail\InvoiceMail;
 
@@ -624,7 +627,10 @@ class InvoiceController extends Controller
             'notes' => 'nullable|string',
             'sales_rep_id' => 'nullable|uuid|exists:users,id',
             'payment_option' => 'sometimes|in:instant,credit',
-            'payment_method' => 'required_if:payment_option,instant|nullable|string',
+            // Not required_if here - whether a method is actually needed depends on
+            // how much of the order's total the order already has paid (checked below,
+            // after the order is loaded), which can be enough to leave nothing to collect.
+            'payment_method' => 'nullable|string',
             'transaction_id' => 'nullable|string',
             'down_payment_amount' => 'nullable|numeric|min:0.01',
             'down_payment_method' => 'required_with:down_payment_amount|nullable|string',
@@ -740,8 +746,12 @@ class InvoiceController extends Controller
                 'tax_amount' => 0,
                 'discount_amount' => 0,
                 'total_amount' => $totalAmount,
-                'amount_paid' => $amountPaid,
-                'balance_amount' => $totalAmount - $amountPaid,
+                // Not seeded from $amountPaid here - the reconciliation right after
+                // calculateTotals() below allocates the order's actual Payment
+                // record(s) onto this invoice and sets these from that, which is
+                // the same source of truth applyPayment() uses everywhere else.
+                'amount_paid' => 0,
+                'balance_amount' => $totalAmount,
                 'invoice_number' => $this->generateInvoiceNumber($user->company_id),
                 'etims_requested' => $request->boolean('generate_etims_receipt', true),
             ]);
@@ -780,11 +790,63 @@ class InvoiceController extends Controller
             // Calculate totals
             $invoice->calculateTotals();
 
-            // Instant payment: settle whatever balance remains right now.
-            if ($paymentOption === 'instant') {
+            // The order this invoice is created from may already have real Payment
+            // record(s) against it (e.g. an instant-payment order, or one that ended
+            // up overpaid) that were never linked to any invoice - allocate whatever
+            // each has unapplied onto this invoice now, up to the invoice total,
+            // instead of leaving that money stranded or collecting it again below.
+            // Anything left over (a genuine overpayment) stays unapplied on the
+            // original Payment record, exactly like any other over-collected
+            // payment - visible via the existing payment-mapping tools for a
+            // refund or applying it to a future invoice.
+            $unallocated = $order->payments()
+                ->where('status', 'completed')
+                ->get()
+                ->map(fn ($payment) => [
+                    'payment' => $payment,
+                    'available' => (float) $payment->amount_paid - (float) $payment->allocations()->sum('amount_allocated'),
+                ])
+                ->filter(fn ($entry) => $entry['available'] > 0.01);
+
+            if ($unallocated->isNotEmpty()) {
+                $stillToAllocate = (float) $invoice->total_amount;
+                foreach ($unallocated as $entry) {
+                    if ($stillToAllocate <= 0.01) {
+                        break;
+                    }
+                    $allocateAmount = round(min($entry['available'], $stillToAllocate), 2);
+                    PaymentAllocation::create([
+                        'payment_id' => $entry['payment']->id,
+                        'invoice_id' => $invoice->id,
+                        'amount_allocated' => $allocateAmount,
+                        'allocated_date' => now(),
+                        'notes' => 'Auto-allocated from the order\'s existing payment on invoice creation',
+                    ]);
+                    $stillToAllocate -= $allocateAmount;
+                }
+
                 $invoice->refresh();
-                $remaining = (float) $invoice->total_amount - (float) $invoice->getTotalAllocatedAmount();
+                $allocated = (float) $invoice->getTotalAllocatedAmount();
+                $invoice->update([
+                    'amount_paid' => $allocated,
+                    'balance_amount' => (float) $invoice->total_amount - $allocated,
+                    'status' => $this->calculateInvoiceStatus($allocated, $invoice->total_amount, $invoice->due_date),
+                ]);
+                $invoice->refresh();
+            }
+
+            // Instant payment: settle whatever balance remains right now, after
+            // the reconciliation above - getTotalAllocatedAmount() is now accurate,
+            // so this only collects a genuine shortfall, never money already paid.
+            if ($paymentOption === 'instant') {
+                $remaining = round((float) $invoice->total_amount - (float) $invoice->getTotalAllocatedAmount(), 2);
                 if ($remaining > 0) {
+                    if (!$request->filled('payment_method')) {
+                        DB::rollBack();
+                        return response()->json([
+                            'message' => 'Payment method is required to collect the remaining balance of ' . number_format($remaining, 2) . '.',
+                        ], 422);
+                    }
                     $this->paymentApplication->applyPayment(
                         $invoice,
                         $user,
@@ -796,6 +858,8 @@ class InvoiceController extends Controller
                     );
                     $invoice->refresh();
                 }
+                // remaining <= 0: the order's existing payment(s) already cover the
+                // invoice in full (or overpaid it) - nothing new to collect.
             } elseif ($request->filled('down_payment_amount')) {
                 // Credit invoice with a down payment, e.g. to cover the slice that
                 // exceeds the customer's available credit.
@@ -1403,6 +1467,11 @@ class InvoiceController extends Controller
                         'transaction_id' => $allocation->payment->transaction_id,
                         'amount_paid' => $allocation->payment->amount_paid,
                         'amount_applied' => $allocation->amount_allocated,
+                        // Unapplied excess still sitting on this specific Payment record
+                        // (not this invoice) - e.g. the customer paid more than the
+                        // invoice total in one lump sum. Refundable via
+                        // POST /payments/{id}/refund-overpayment.
+                        'available_to_refund' => (float) $allocation->payment->remaining_amount,
                         'status' => $allocation->payment->status,
                         'payment_date' => $allocation->payment->payment_date,
                         'applied_date' => $allocation->allocated_date,
@@ -1455,7 +1524,9 @@ class InvoiceController extends Controller
 
             // Calculate total allocated amount
             $totalAllocated = $payment->allocations()->sum('amount_allocated') ?? 0;
-            $availableAmount = $payment->amount_paid - $totalAllocated;
+            $refundedAmount = $payment->refunds()->where('status', 'completed')->sum('amount') ?? 0;
+            $pendingRefundAmount = $payment->refunds()->where('status', 'pending')->sum('amount') ?? 0;
+            $availableAmount = $payment->amount_paid - $totalAllocated - $refundedAmount - $pendingRefundAmount;
 
             // Get allocation details
             $allocations = $payment->allocations()
@@ -1481,6 +1552,8 @@ class InvoiceController extends Controller
                     'payment_date' => $payment->payment_date,
                     'total_amount' => $payment->amount_paid,
                     'allocated_amount' => $totalAllocated,
+                    'refunded_amount' => $refundedAmount,
+                    'pending_refund_amount' => $pendingRefundAmount,
                     'available_amount' => $availableAmount,
                     'is_fully_allocated' => $availableAmount <= 0,
                     'allocation_percentage' => $payment->amount_paid > 0 ? round(($totalAllocated / $payment->amount_paid) * 100, 2) : 0,
@@ -1495,6 +1568,106 @@ class InvoiceController extends Controller
                 'error' => $e->getMessage()
             ]);
             return response()->json(['message' => 'Failed to get payment information', 'error' => $e->getMessage()], 500);
+        }
+    }
+
+    /**
+     * Refund unapplied excess off a customer payment (e.g. they paid more
+     * than an invoice's total in one lump sum). Every method except cheque
+     * completes immediately since real money is moving now; a cheque stays
+     * "pending" until approved/cleared, mirroring every other cheque flow in
+     * this app, and only then reduces what's available to refund/allocate.
+     */
+    public function refundPaymentOverpayment(Request $request, string $paymentId): JsonResponse
+    {
+        $user = $request->user();
+        $companyId = $user->company_id;
+        if (!$this->hasPermission($request, 'can_refund_payments', $companyId)) {
+            return response()->json(['message' => 'Unauthorized'], 403);
+        }
+
+        $validator = Validator::make($request->all(), [
+            'amount' => 'required|numeric|min:0.01',
+            'refund_method' => 'required|string|in:bank_transfer,cash,mobile_money,cheque,other',
+            'reference' => 'nullable|string|max:255',
+            'reason' => 'required|string',
+            'notes' => 'nullable|string',
+            'refund_date' => 'nullable|date',
+            'cheque_number' => 'required_if:refund_method,cheque|string|max:100',
+            'bank_name' => 'required_if:refund_method,cheque|string|max:150',
+            'maturity_date' => 'required_if:refund_method,cheque|date|after_or_equal:refund_date',
+        ]);
+
+        if ($validator->fails()) {
+            return response()->json(['message' => $validator->errors(), 'errors' => $validator->errors()], 422);
+        }
+
+        try {
+            DB::beginTransaction();
+
+            $payment = Payment::where('company_id', $companyId)->lockForUpdate()->findOrFail($paymentId);
+
+            $available = (float) $payment->remaining_amount;
+            $amount = (float) $request->input('amount');
+            if ($amount > $available + 0.01) {
+                DB::rollBack();
+                return response()->json([
+                    'message' => 'Refund amount (' . number_format($amount, 2) . ') exceeds the available unapplied balance (' . number_format($available, 2) . ') on this payment.',
+                ], 422);
+            }
+
+            $refundDate = $request->input('refund_date', now()->toDateString());
+            $isCheque = $request->input('refund_method') === 'cheque';
+
+            $refund = PaymentRefund::create([
+                'payment_id' => $payment->id,
+                'company_id' => $companyId,
+                'customer_id' => $payment->customer_id,
+                'amount' => $amount,
+                'refund_date' => $refundDate,
+                'refund_method' => $request->input('refund_method'),
+                'reference' => $request->input('reference'),
+                'reason' => $request->input('reason'),
+                'notes' => $request->input('notes'),
+                'status' => $isCheque ? 'pending' : 'completed',
+                'created_by' => $user->id,
+            ]);
+
+            if ($isCheque) {
+                $customer = $payment->customer;
+                Cheque::create([
+                    'id' => (string) Str::uuid(),
+                    'company_id' => $companyId,
+                    'direction' => 'issued',
+                    'customer_id' => $payment->customer_id,
+                    'payee_name' => $customer->name ?? null,
+                    'payment_refund_id' => $refund->id,
+                    'cheque_number' => $request->input('cheque_number'),
+                    'bank_name' => $request->input('bank_name'),
+                    'amount' => $amount,
+                    'issue_date' => $refundDate,
+                    'maturity_date' => $request->input('maturity_date'),
+                    'status' => 'pending',
+                    'notes' => $request->input('notes'),
+                    'created_by' => $user->id,
+                ]);
+            } else {
+                $payment->update(['amount_refunded' => (float) $payment->amount_refunded + $amount]);
+            }
+
+            DB::commit();
+
+            return response()->json([
+                'status' => 'success',
+                'message' => $isCheque
+                    ? 'Refund cheque recorded - pending clearance. It will not reduce the available balance permanently until approved, and the Director/GM will be alerted a week before it matures.'
+                    : 'Refund recorded successfully',
+                'data' => $refund->load('cheque'),
+            ], 201);
+        } catch (\Exception $e) {
+            DB::rollBack();
+            Log::error('Failed to refund payment overpayment', ['payment_id' => $paymentId, 'error' => $e->getMessage()]);
+            return response()->json(['message' => 'Failed to record refund', 'error' => $e->getMessage()], 500);
         }
     }
 

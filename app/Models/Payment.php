@@ -23,12 +23,14 @@ class Payment extends Model
         'payment_method',
         'transaction_id',
         'amount_paid',
+        'amount_refunded',
         'status',
         'payment_date',
     ];
 
     protected $casts = [
         'amount_paid' => 'decimal:2',
+        'amount_refunded' => 'decimal:2',
         'amount_applied' => 'decimal:2',
         'payment_date' => 'date',
         'applied_date' => 'datetime',
@@ -83,11 +85,23 @@ class Payment extends Model
     }
 
     /**
-     * Get remaining unallocated amount
+     * Get remaining unallocated, unrefunded amount - what's actually still
+     * free to apply to an invoice or hand back to the customer. Includes
+     * refunds still pending (an unapproved cheque) so the same excess can't
+     * be refunded twice while one is in flight.
      */
     public function getRemainingAmountAttribute()
     {
-        return $this->amount_paid - $this->total_allocated;
+        $refundedOrPending = $this->refunds()->whereIn('status', ['completed', 'pending'])->sum('amount');
+        return $this->amount_paid - $this->total_allocated - $refundedOrPending;
+    }
+
+    /**
+     * All refunds issued against this payment's unapplied excess.
+     */
+    public function refunds()
+    {
+        return $this->hasMany(PaymentRefund::class);
     }
 
     /**

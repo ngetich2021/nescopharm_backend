@@ -5,10 +5,16 @@ namespace App\Http\Controllers;
 use App\Models\Cheque;
 use App\Models\Customer;
 use App\Models\Invoice;
+use App\Models\Payment;
+use App\Models\PaymentRefund;
+use App\Models\PurchaseOrder;
 use App\Models\Supplier;
+use App\Models\SupplierPayment;
+use App\Services\AccountingIntegrationService;
 use App\Services\InvoicePaymentApplicationService;
 use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Validator;
 use Illuminate\Support\Str;
@@ -16,11 +22,13 @@ use Illuminate\Support\Str;
 class ChequeController extends Controller
 {
     protected InvoicePaymentApplicationService $paymentApplication;
+    protected AccountingIntegrationService $accountingService;
 
-    public function __construct(InvoicePaymentApplicationService $paymentApplication)
+    public function __construct(InvoicePaymentApplicationService $paymentApplication, AccountingIntegrationService $accountingService)
     {
         $this->middleware('auth:sanctum');
         $this->paymentApplication = $paymentApplication;
+        $this->accountingService = $accountingService;
     }
 
     protected function hasPermission(Request $request, $permission, $resourceCompanyId = null)
@@ -275,11 +283,78 @@ class ChequeController extends Controller
         }
 
         if ($cheque->direction === 'issued') {
-            $cheque->update([
-                'status' => 'approved',
-                'approved_by' => $user->id,
-                'approved_at' => now(),
-            ]);
+            DB::beginTransaction();
+            try {
+                $cheque->update([
+                    'status' => 'approved',
+                    'approved_by' => $user->id,
+                    'approved_at' => now(),
+                ]);
+
+                // Only now has the cheque actually turned into real money - post it
+                // against the purchase order/accounting the same way a normal
+                // (non-cheque) supplier payment is posted immediately at record time.
+                if ($cheque->supplier_payment_id) {
+                    $payment = SupplierPayment::find($cheque->supplier_payment_id);
+                    if ($payment && $payment->status === 'pending') {
+                        $payment->update(['status' => 'completed']);
+
+                        if ($cheque->purchase_order_id) {
+                            $purchaseOrder = PurchaseOrder::lockForUpdate()->find($cheque->purchase_order_id);
+                            if ($purchaseOrder) {
+                                $newAmountPaid = $purchaseOrder->amount_paid + $payment->amount;
+                                $poStatus = 'unpaid';
+                                if ($newAmountPaid >= $purchaseOrder->total_amount && $purchaseOrder->total_amount > 0) {
+                                    $poStatus = 'paid';
+                                } elseif ($newAmountPaid > 0) {
+                                    $poStatus = 'partial';
+                                }
+                                $purchaseOrder->update([
+                                    'amount_paid' => $newAmountPaid,
+                                    'payment_status' => $poStatus,
+                                ]);
+                            }
+                        }
+
+                        $supplier = $cheque->supplier_id ? Supplier::find($cheque->supplier_id) : null;
+                        if ($supplier) {
+                            $this->accountingService->setCompany($cheque->company_id);
+                            $this->accountingService->setUser($user->id);
+                            $this->accountingService->recordSupplierPayment([
+                                'company_id' => $cheque->company_id,
+                                'supplier_id' => $supplier->id,
+                                'supplier_name' => $supplier->supplier_name,
+                                'amount' => $payment->amount,
+                                'payment_method' => 'cheque',
+                                'date' => now()->toDateString(),
+                                'reference' => $payment->payment_number,
+                                'source_id' => $payment->id,
+                                'source_type' => SupplierPayment::class,
+                            ]);
+                        }
+                    }
+                }
+
+                // A refund cheque handing back a customer's overpayment - only now
+                // does the excess actually leave the business, so only now does it
+                // stop counting toward the payment's available balance.
+                if ($cheque->payment_refund_id) {
+                    $refund = PaymentRefund::find($cheque->payment_refund_id);
+                    if ($refund && $refund->status === 'pending') {
+                        $refund->update(['status' => 'completed']);
+                        $payment = Payment::find($refund->payment_id);
+                        if ($payment) {
+                            $payment->update(['amount_refunded' => (float) $payment->amount_refunded + (float) $refund->amount]);
+                        }
+                    }
+                }
+
+                DB::commit();
+            } catch (\Exception $e) {
+                DB::rollBack();
+                Log::error('Failed to finalize cleared cheque', ['cheque_id' => $cheque->id, 'error' => $e->getMessage()]);
+                return response()->json(['message' => 'Failed to clear cheque', 'error' => $e->getMessage()], 500);
+            }
 
             return response()->json([
                 'message' => 'Cheque marked as cleared',
@@ -350,6 +425,22 @@ class ChequeController extends Controller
         }
 
         $cheque->update(['status' => $newStatus]);
+
+        // It never turned into real money - the linked supplier payment record
+        // should stop showing as "pending" and reflect that it didn't go through.
+        if ($cheque->supplier_payment_id) {
+            SupplierPayment::where('id', $cheque->supplier_payment_id)
+                ->where('status', 'pending')
+                ->update(['status' => 'failed']);
+        }
+
+        // Same for a refund cheque that bounced/was cancelled - the excess it
+        // was meant to hand back is still available (never left the business).
+        if ($cheque->payment_refund_id) {
+            PaymentRefund::where('id', $cheque->payment_refund_id)
+                ->where('status', 'pending')
+                ->update(['status' => 'failed']);
+        }
 
         return response()->json([
             'message' => "Cheque marked as {$newStatus}",
