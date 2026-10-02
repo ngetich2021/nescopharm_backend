@@ -4,6 +4,7 @@ namespace App\Models;
 
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
+use App\Services\TaxCompliance\EtimsTaxType;
 
 class QuoteItem extends Model
 {
@@ -26,10 +27,27 @@ class QuoteItem extends Model
         'unit_price',
         'price_label',
         'total_price',
+        'tax_type_code',
+        'tax_rate',
         'company_id',
         'created_at',
         'updated_at',
     ];
+
+    /**
+     * The VAT rate is captured whenever a line is created or edited, so a
+     * later change to the product's rate doesn't rewrite quotes already
+     * issued. Re-saving the quote re-prices it at the current rate.
+     */
+    protected static function booted(): void
+    {
+        static::saving(function (QuoteItem $item) {
+            $product = $item->product_id ? Product::with('vatCategory')->find($item->product_id) : null;
+            $code = $product ? EtimsTaxType::forProduct($product) : 'D';
+            $item->tax_type_code = $code;
+            $item->tax_rate = EtimsTaxType::rate($code);
+        });
+    }
 
     protected $casts = [
         'id' => 'string',
@@ -69,6 +87,36 @@ class QuoteItem extends Model
     public function packagingUnit()
     {
         return $this->belongsTo(\App\Models\ProductPackagingUnit::class, 'unit_id');
+    }
+
+    public function itemCode(): ?string
+    {
+        return $this->variant?->sku ?: ($this->product?->product_code ?: $this->product?->sku);
+    }
+
+    public function packSize(): string
+    {
+        if ($this->packagingUnit) {
+            return 'Per ' . strtolower($this->packagingUnit->unit_name);
+        }
+        $unit = $this->product?->base_unit ?: $this->product?->unit_of_measurement;
+        return $unit ? 'Per ' . strtolower($unit) : 'Per piece';
+    }
+
+    /**
+     * @return array{code: string, label: string, rate: float}
+     */
+    public function taxInfo(): array
+    {
+        $code = $this->tax_type_code
+            ?: ($this->product ? EtimsTaxType::forProduct($this->product) : 'D');
+
+        return ['code' => $code, 'label' => EtimsTaxType::label($code), 'rate' => EtimsTaxType::rate($code)];
+    }
+
+    public function netAmount(): float
+    {
+        return (float) $this->quantity * (float) $this->unit_price;
     }
 
     /**

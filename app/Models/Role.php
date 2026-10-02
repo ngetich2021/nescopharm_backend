@@ -67,14 +67,26 @@ class Role extends Model
     }
 
     /**
+     * Active permission keys, loaded once per Role instance. Controllers call hasPermission()
+     * several times per request, and against the remote DB each lookup was a ~200ms round trip.
+     */
+    protected ?array $activePermissionKeys = null;
+
+    /**
      * Check if role has a specific permission
      */
     public function hasPermission($permissionKey)
     {
-        return $this->permissions()
-                    ->where('permissions.key', $permissionKey)
-                    ->whereRaw('permissions.is_active = true')
-                    ->exists();
+        if ($this->activePermissionKeys === null) {
+            $this->activePermissionKeys = array_flip($this->getPermissionKeys());
+        }
+
+        return isset($this->activePermissionKeys[$permissionKey]);
+    }
+
+    public function flushPermissionCache(): void
+    {
+        $this->activePermissionKeys = null;
     }
 
     /**
@@ -88,6 +100,7 @@ class Role extends Model
                 'granted_at' => now(),
             ]);
         }
+        $this->flushPermissionCache();
     }
 
     /**
@@ -96,6 +109,7 @@ class Role extends Model
     public function removePermission($permissionId)
     {
         $this->permissions()->detach($permissionId);
+        $this->flushPermissionCache();
     }
 
 

@@ -24,6 +24,7 @@ class DailyWorkReport extends Model
         'entries',
         'key_achievements',
         'pending_work',
+        'remarks',
         'status',
         'auto_generated',
         'approver_role',

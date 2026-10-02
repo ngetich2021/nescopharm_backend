@@ -167,6 +167,7 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::post('employee-portal/salary-advances', [EmployeeSelfServiceController::class, 'salaryAdvanceStore']);
     Route::get('employee-portal/daily-reports', [EmployeeSelfServiceController::class, 'dailyReportIndex']);
     Route::post('employee-portal/daily-reports', [EmployeeSelfServiceController::class, 'dailyReportStore']);
+    Route::delete('employee-portal/daily-reports/{id}', [EmployeeSelfServiceController::class, 'dailyReportDestroy']);
 
     // Time Entries
     Route::apiResource('time-entries', TimeEntryController::class);
@@ -370,11 +371,13 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::patch('dispatches/{id}/acknowledge', [\App\Http\Controllers\DispatchController::class, 'acknowledge']); // Acknowledge receipt of items
         Route::patch('dispatches/{id}/return', [\App\Http\Controllers\DispatchController::class, 'markReturned']); // Mark items as returned
         Route::get('dispatches/overdue', [\App\Http\Controllers\DispatchController::class, 'overdue']); // List overdue dispatch items
+        Route::get('dispatches/{id}/requisition-note', [\App\Http\Controllers\DispatchController::class, 'printRequisitionNote']); // Download requisition note PDF
 
         // Requisition routes
         Route::get('requisitions', [\App\Http\Controllers\RequisitionController::class, 'index']); // List all requisitions
         Route::post('requisitions', [\App\Http\Controllers\RequisitionController::class, 'store']); // Create a new requisition
         Route::get('requisitions/{id}', [\App\Http\Controllers\RequisitionController::class, 'show']); // Get a single requisition
+        Route::get('requisitions/{id}/official-purpose', [\App\Http\Controllers\RequisitionController::class, 'printOfficialPurpose']); // Download Official Purpose PDF
         Route::match(['patch', 'put'], 'requisitions/{id}', [\App\Http\Controllers\RequisitionController::class, 'update']); // Update a requisition
         Route::delete('requisitions/{id}', [\App\Http\Controllers\RequisitionController::class, 'destroy']); // Delete a requisition
         Route::patch('requisitions/{id}/approve', [\App\Http\Controllers\RequisitionController::class, 'approve']); // Approve a requisition
@@ -430,7 +433,9 @@ Route::middleware('auth:sanctum')->group(function () {
 
     // Quote routes
     Route::get('/quotes', [QuoteController::class, 'index']);
+    Route::get('/quotes/sales-reps', [QuoteController::class, 'salesReps'])->name('quotes.salesReps');
     Route::get('/quotes/{quoteId}', [QuoteController::class, 'show'])->name('quotes.show');
+    Route::patch('/quotes/{quoteId}/sales-rep', [QuoteController::class, 'assignSalesRep'])->name('quotes.assignSalesRep');
     Route::post('/quotes', [QuoteController::class, 'store'])->name('quotes.store');
     Route::match(['patch', 'put'], '/quotes/{quoteId}', [QuoteController::class, 'update'])->name('quotes.update');
     Route::delete('/quotes/{id}', [QuoteController::class, 'destroy'])->name('quotes.destroy');
@@ -524,6 +529,28 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('/logistics/{id}', [LogisticController::class, 'show'])->name('logistics.show');
     Route::post('/logistics', [LogisticController::class, 'store'])->name('logistics.store');
     Route::match(['patch', 'put'], '/logistics/{id}', [LogisticController::class, 'update'])->name('logistics.update');
+    Route::post('/logistics/{id}/upload-delivery-note', [LogisticController::class, 'uploadDeliveryNote'])->name('logistics.upload-delivery-note');
+    Route::post('/logistics/{id}/review-delivery-note', [LogisticController::class, 'reviewDeliveryNote'])->name('logistics.review-delivery-note');
+
+    // Delivery Rates (per-transporter, per-zone; warehouse manager creates, GM/Director approves)
+    Route::get('/delivery-rates', [\App\Http\Controllers\DeliveryRateController::class, 'index']);
+    Route::get('/delivery-rates/{id}', [\App\Http\Controllers\DeliveryRateController::class, 'show']);
+    Route::post('/delivery-rates', [\App\Http\Controllers\DeliveryRateController::class, 'store']);
+    Route::match(['patch', 'put'], '/delivery-rates/{id}', [\App\Http\Controllers\DeliveryRateController::class, 'update']);
+    Route::post('/delivery-rates/{id}/approve', [\App\Http\Controllers\DeliveryRateController::class, 'approve']);
+    Route::post('/delivery-rates/{id}/reject', [\App\Http\Controllers\DeliveryRateController::class, 'reject']);
+    Route::delete('/delivery-rates/{id}', [\App\Http\Controllers\DeliveryRateController::class, 'destroy']);
+
+    // Delivery Invoices (auto-created when logistics is created with a rate; accountant pays)
+    Route::get('/delivery-invoices', [\App\Http\Controllers\DeliveryInvoiceController::class, 'index']);
+    Route::get('/delivery-invoices/export/excel', [\App\Http\Controllers\DeliveryInvoiceController::class, 'exportExcel']);
+    Route::get('/delivery-invoices/{id}', [\App\Http\Controllers\DeliveryInvoiceController::class, 'show']);
+    Route::post('/delivery-invoices/{id}/pay', [\App\Http\Controllers\DeliveryInvoiceController::class, 'pay']);
+    Route::post('/delivery-invoices/{id}/cancel', [\App\Http\Controllers\DeliveryInvoiceController::class, 'cancel']);
+
+    // Delivery Notes (auto-generated once a dispatch is marked delivered)
+    Route::get('/delivery-notes', [\App\Http\Controllers\DeliveryNoteController::class, 'index']);
+    Route::get('/delivery-notes/{id}', [\App\Http\Controllers\DeliveryNoteController::class, 'show']);
 
     // Payment routes
     Route::get('/payments', [PaymentController::class, 'index'])->name('payments.index');
@@ -763,9 +790,11 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::match(['patch', 'put'], '/{sopId}/annexures/{annexureId}/entries/{entryId}', [SopAnnexureEntryController::class, 'update']);
         Route::delete('/{sopId}/annexures/{annexureId}/entries/{entryId}', [SopAnnexureEntryController::class, 'destroy']);
 
-        // User-tracked comments
+        // User-tracked comments (includes CAPA documents via comment_type='capa' with file upload)
         Route::get('/{sopId}/comments', [SopCommentController::class, 'index']);
         Route::post('/{sopId}/comments', [SopCommentController::class, 'store']);
+        Route::get('/{sopId}/comments/{commentId}/download', [SopCommentController::class, 'downloadFile']);
+        Route::get('/{sopId}/comments/{commentId}/access-url', [SopCommentController::class, 'getFileAccessUrl']);
         Route::delete('/{sopId}/comments/{commentId}', [SopCommentController::class, 'destroy']);
     });
 
@@ -955,6 +984,7 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::delete('payment-allocations/{allocationId}', [InvoiceController::class, 'deallocatePayment']);
     Route::get('invoices-sales-reps', [InvoiceController::class, 'getSalesReps']);
     Route::post('invoices/{id}/assign-rep', [InvoiceController::class, 'assignRep']);
+    Route::get('products/batch-list', [InvoiceController::class, 'productBatchList']);
     Route::apiResource('invoices', InvoiceController::class);
 
     // PD Cheques

@@ -17,6 +17,7 @@ class ProductPriceTier extends Model
         'id',
         'company_id',
         'product_id',
+        'variant_id',
         'tier_name',
         'price',
     ];

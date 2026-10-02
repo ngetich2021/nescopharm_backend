@@ -59,21 +59,43 @@ class PayrollService
             SalaryAdvance::where('deducted_in_run', $run->id)
                 ->update(['deducted_in_run' => null]);
 
+            // Get the first and last day of the pay month
+            $monthStart = sprintf('%04d-%02d-01', $run->pay_year, $run->pay_month);
+            $monthEnd = date('Y-m-t', strtotime($monthStart));
+
+            // Include only active employees who:
+            // 1. Were hired on or before the last day of the pay month
+            // 2. Were either never terminated OR terminated during this pay month
+            //    (if terminated, they only get paid the month they're terminated)
             $employees = Employee::where('company_id', $run->company_id)
                 ->whereRaw('is_active = true')
+                ->where(function ($q) use ($monthStart, $monthEnd) {
+                    $q->whereNull('hire_date')
+                      ->orWhere('hire_date', '<=', $monthEnd);
+                })
+                ->where(function ($q) use ($monthStart, $monthEnd) {
+                    $q->whereNull('termination_date')
+                      ->orWhereBetween('termination_date', [$monthStart, $monthEnd]);
+                })
                 ->get();
 
-            $payDate = sprintf('%04d-%02d-01', $run->pay_year, $run->pay_month);
+            $payDate = $monthStart;
 
             foreach ($employees as $employee) {
-                $this->processEmployee($run, $employee, $payDate);
+                $this->processEmployee($run, $employee, $payDate, $monthStart, $monthEnd);
             }
         });
     }
 
-    private function processEmployee(PayrollRun $run, Employee $employee, string $payDate): void
+    private function processEmployee(PayrollRun $run, Employee $employee, string $payDate, string $monthStart, string $monthEnd): void
     {
+        // Calculate working days for proration if hired or terminated mid-month
+        $workingDaysInMonth = $this->getWorkingDaysInMonth($monthStart, $monthEnd);
+        $employeeWorkingDays = $this->getEmployeeWorkingDays($employee, $monthStart, $monthEnd);
+        $prorationRatio = $workingDaysInMonth > 0 ? $employeeWorkingDays / $workingDaysInMonth : 1.0;
+
         $basicSalary = $this->toScale($employee->basic_salary);
+        $basicSalary = bcmul($basicSalary, (string)$prorationRatio, 2);
 
         // ── Allowances ──────────────────────────────────────────────
         $allowances = $this->getApplicableAllowances($employee, $run->pay_month, $payDate);
@@ -391,5 +413,48 @@ class PayrollService
     private function toScale(mixed $value): string
     {
         return bcadd((string) ($value ?? '0'), '0', 2);
+    }
+
+    /**
+     * Calculate total days in a given month (all days payable).
+     */
+    private function getWorkingDaysInMonth(string $monthStart, string $monthEnd): int
+    {
+        $start = new \DateTime($monthStart);
+        $end = new \DateTime($monthEnd);
+        // Days from 1st to last day of month (inclusive)
+        return (int) $end->format('d');
+    }
+
+    /**
+     * Calculate days employee worked (accounts for hire/termination dates, all days payable).
+     * Example: Sept 15 to Sept 30 = 16 days (includes both start and end dates)
+     */
+    private function getEmployeeWorkingDays(Employee $employee, string $monthStart, string $monthEnd): int
+    {
+        $start = new \DateTime($monthStart);
+        $end = new \DateTime($monthEnd);
+
+        // Adjust start if employee was hired after month start
+        if ($employee->hire_date) {
+            $hireDate = new \DateTime($employee->hire_date->toDateString());
+            if ($hireDate > $start) {
+                $start = $hireDate;
+            }
+        }
+
+        // Adjust end if employee was terminated before month end
+        if ($employee->termination_date) {
+            $terminationDate = new \DateTime($employee->termination_date->toDateString());
+            if ($terminationDate < $end) {
+                $end = $terminationDate;
+            }
+        }
+
+        // Simple calculation: (end day - start day) + 1 (includes both days)
+        // Example: Sept 15 to Sept 30 = (30 - 15) + 1 = 16 days
+        $startDay = (int) $start->format('d');
+        $endDay = (int) $end->format('d');
+        return ($endDay - $startDay) + 1;
     }
 }

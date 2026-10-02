@@ -7,6 +7,7 @@ use App\Models\Invoice;
 use App\Models\InvoiceLineItem;
 use App\Models\Customer;
 use App\Models\Logistic;
+use App\Models\DeliveryNote;
 use App\Models\Order;
 use App\Models\Payment;
 use App\Models\PaymentAllocation;
@@ -668,13 +669,14 @@ class InvoiceController extends Controller
             $totalAmount = $order->final_amount;
             $invoiceDate = $request->invoice_date ?? now()->toDateString();
             $paymentOption = $request->input('payment_option');
+            $alreadySettled = $totalAmount > 0 && (float) $amountPaid >= (float) $totalAmount;
 
-            if ($paymentOption === 'instant') {
+            if ($paymentOption === 'instant' || $alreadySettled) {
                 $credit = [
                     'payment_type' => 'cash',
                     'credit_terms_days' => null,
                     'due_date' => $invoiceDate,
-                    'payment_terms' => $request->payment_terms ?? 'Paid Instantly',
+                    'payment_terms' => $alreadySettled ? 'Paid' : ($request->payment_terms ?? 'Paid Instantly'),
                 ];
             } else {
                 $credit = $this->resolveInvoiceCredit(
@@ -697,6 +699,9 @@ class InvoiceController extends Controller
             // details (which only records a generic method like "courier").
             $logistic = $dispatch
                 ? Logistic::where('order_dispatch_id', $dispatch->id)->latest()->first()
+                : null;
+            $deliveryNote = $dispatch
+                ? DeliveryNote::where('order_dispatch_id', $dispatch->id)->latest()->first()
                 : null;
             $destination = collect([$logistic?->delivery_location, $logistic?->state])
                 ->filter()
@@ -732,9 +737,9 @@ class InvoiceController extends Controller
                 // physical document in this system, hence the shared number.
                 'dispatch_doc_no' => $dispatch?->dispatch_number,
                 'delivery_note_number' => $dispatch?->dispatch_number,
-                // The date the dispatch is scheduled to deliver by, not the
-                // date the dispatch record itself was created.
-                'delivery_note_date' => $dispatch?->estimated_delivery_date,
+                // The date the delivery note itself was generated, not the
+                // dispatch's estimated delivery date.
+                'delivery_note_date' => $deliveryNote?->created_at?->toDateString(),
                 'dispatched_through' => $logistic?->logistics_provider ?: ($logistic?->delivery_method ?: $deliveryDetail?->delivery_method),
                 'destination' => $destination,
                 // The order IS the buyer's reference document for this sale.
@@ -756,6 +761,17 @@ class InvoiceController extends Controller
                 'etims_requested' => $request->boolean('generate_etims_receipt', true),
             ]);
 
+            $order->update([
+                'payment_type' => $credit['payment_type'],
+                'credit_terms_days' => $credit['credit_terms_days'],
+            ]);
+
+            // The order's discount is spread over its lines in proportion to
+            // each line's value, so the invoice's VAT (charged on the
+            // discounted amount) and total match the order exactly.
+            $orderSubtotal = (float) $order->orderItems->sum(fn ($i) => (float) $i->quantity * (float) ($i->unit_price ?? 0));
+            $discountRatio = $orderSubtotal > 0 ? min(1, (float) ($order->discount ?? 0) / $orderSubtotal) : 0;
+
             // Create line items from order items
             foreach ($order->orderItems as $orderItem) {
                 // The order already recorded exactly which batch(es) FEFO
@@ -765,12 +781,28 @@ class InvoiceController extends Controller
                 // use the earliest expiry (the more conservative date).
                 $batchNumber = null;
                 $expiryDate = null;
+                // VAT rate as agreed on the order; a 0% line keeps the
+                // product's own exempt/zero-rated/non-VAT classification.
+                $lineTaxRate = (float) ($orderItem->tax_rate ?? 0);
+                $taxCode = \App\Services\TaxCompliance\EtimsTaxType::fromInput(null, $lineTaxRate);
+                if ($lineTaxRate == 0.0 && $orderItem->product) {
+                    $productCode = \App\Services\TaxCompliance\EtimsTaxType::forProduct($orderItem->product);
+                    $taxCode = in_array($productCode, ['A', 'C', 'D'], true) ? $productCode : 'D';
+                }
+                $metadata = ['etims_tax_type_code' => $taxCode, 'price_label' => $orderItem->price_label];
                 $allocations = $orderItem->batch_allocations ?? [];
                 if (!empty($allocations)) {
                     $batchNumber = collect($allocations)->pluck('batch_number')->filter()->unique()->implode(', ');
                     $expiryDate = collect($allocations)->pluck('expiry_date')->filter()->sort()->first();
+                    // Per-batch split so the printed invoice can list each batch with its own qty and expiry.
+                    $metadata['batches'] = collect($allocations)->map(fn ($a) => [
+                        'batch_number' => $a['batch_number'] ?? null,
+                        'expiry_date' => $a['expiry_date'] ?? null,
+                        'quantity' => $a['quantity'] ?? null,
+                    ])->values()->all();
                 }
 
+                $lineUnitPrice = $orderItem->unit_price ?? $orderItem->price ?? $orderItem->total_price ?? 0;
                 InvoiceLineItem::create([
                     'invoice_id' => $invoice->id,
                     'product_id' => $orderItem->product_id,
@@ -780,10 +812,10 @@ class InvoiceController extends Controller
                     'unit' => 'pcs',
                     'batch_number' => $batchNumber ?: null,
                     'expiry_date' => $expiryDate ?: null,
-                    'unit_price' => $orderItem->unit_price ?? $orderItem->price ?? $orderItem->total_price ?? 0,
-                    'discount_amount' => 0,
-                    'tax_rate' => 0,
-                    'metadata' => ['etims_tax_type_code' => 'D'],
+                    'unit_price' => $lineUnitPrice,
+                    'discount_amount' => round((float) $orderItem->quantity * (float) $lineUnitPrice * $discountRatio, 2),
+                    'tax_rate' => \App\Services\TaxCompliance\EtimsTaxType::rate($taxCode),
+                    'metadata' => $metadata,
                 ]);
             }
 
@@ -1889,5 +1921,56 @@ class InvoiceController extends Controller
             ]);
             return response()->json(['message' => 'Failed to sync invoice amounts', 'error' => $e->getMessage()], 500);
         }
+    }
+
+    public function productBatchList()
+    {
+        $company = $this->getCompanyFromRequest();
+        if (!$company) {
+            return response()->json(['error' => 'Company not found'], 404);
+        }
+
+        $receiptItems = \App\Models\ProductReceiptItem::where('company_id', $company->id)
+            ->with(['product', 'productReceipt'])
+            ->orderByDesc('created_at')
+            ->get();
+
+        $productBatches = [];
+        foreach ($receiptItems as $item) {
+            $productId = $item->product_id;
+
+            if (!isset($productBatches[$productId])) {
+                $productBatches[$productId] = [
+                    'product_id' => $item->product->id,
+                    'product_code' => $item->product->product_code,
+                    'product_name' => $item->product->name,
+                    'stock_quantity' => $item->product->stock_quantity,
+                    'unit_cost' => (float) $item->product->unit_cost,
+                    'price' => (float) $item->product->price,
+                    'batches' => [],
+                ];
+            }
+
+            $productBatches[$productId]['batches'][] = [
+                'batch_number' => $item->batch_number,
+                'expiry_date' => $item->expiry_date,
+                'manufacture_date' => $item->manufacture_date,
+                'quantity' => $item->quantity,
+                'receipt_number' => $item->productReceipt->product_receipt_number,
+                'supplier' => $item->supplier,
+            ];
+        }
+
+        return response()->json(array_values($productBatches));
+    }
+
+    private function getCompanyFromRequest()
+    {
+        if (auth()->check()) {
+            return auth()->user()->company;
+        }
+        return \App\Models\Company::where('name', 'Nescopharm')
+            ->where('id', '!=', 'ef6df756-29ac-4153-a4c4-cc702c7956bd')
+            ->first();
     }
 }

@@ -83,7 +83,7 @@ class OrderDispatchController extends Controller
             'items.variant',
             'fromStore',
             'deliveryLocation',
-            'logistic',
+            'logistic.deliveryPerson',
             'createdBy:id,first_name,last_name,email',
         ])->where('company_id', $user->company_id);
 
@@ -109,18 +109,55 @@ class OrderDispatchController extends Controller
 
         $dispatches = $query->orderBy('created_at', 'desc')->paginate($perPage);
 
+        // Batch-load every approver referenced across this page's dispatches in a
+        // single query, instead of the N+1 pattern of calling approver_users /
+        // getCurrentApprover() per row (each does its own User::find()). With a
+        // slow/remote DB connection those per-row queries easily blow past PHP's
+        // execution time limit and truncate the JSON response mid-stream.
+        $approverIds = collect();
+        foreach ($dispatches->items() as $dispatch) {
+            foreach ((array) $dispatch->approvers as $approver) {
+                if (!empty($approver['user_id'])) {
+                    $approverIds->push($approver['user_id']);
+                }
+            }
+        }
+        $approverUsers = User::withTrashed()
+            ->whereIn('id', $approverIds->unique()->values())
+            ->get()
+            ->keyBy('id');
+
         // Add approver details to each dispatch
-        $dispatches->getCollection()->transform(function ($dispatch) {
-            $dispatch->approver_details = $dispatch->approver_users;
-            $dispatch->current_approver = $dispatch->getCurrentApprover();
+        $dispatches->getCollection()->transform(function ($dispatch) use ($approverUsers) {
+            $approvers = collect((array) $dispatch->approvers);
+
+            $dispatch->approver_details = $approvers->map(function ($approver) use ($approverUsers) {
+                return [
+                    'user' => $approverUsers->get($approver['user_id']),
+                    'order' => $approver['order'],
+                    'status' => $approver['status'],
+                    'approved_at' => $approver['approved_at'],
+                    'comments' => $approver['comments'],
+                ];
+            });
+
+            $pending = $approvers->where('status', 'pending')->sortBy('order')->first();
+            $dispatch->current_approver = $pending ? $approverUsers->get($pending['user_id']) : null;
+
             $dispatch->approval_progress = $dispatch->getApprovalProgress();
             return $dispatch;
         });
 
         return response()->json([
-            'success' => true,
+            'status' => 'success',
             'message' => 'Order dispatches retrieved successfully',
-            'data' => $dispatches,
+            'data' => $dispatches->items(),
+            'meta' => [
+                'current_page' => $dispatches->currentPage(),
+                'last_page' => $dispatches->lastPage(),
+                'per_page' => $dispatches->perPage(),
+                'total' => $dispatches->total(),
+            ],
         ], 200);
     }
 
@@ -146,7 +183,7 @@ class OrderDispatchController extends Controller
             'items.variant',
             'fromStore',
             'deliveryLocation',
-            'logistic',
+            'logistic.deliveryPerson',
             'createdBy:id,first_name,last_name,email',
         ])->where('company_id', $user->company_id)
             ->find($id);
@@ -493,7 +530,9 @@ class OrderDispatchController extends Controller
     {
         $user = $request->user();
 
-        if (!$this->hasPermission($request, 'can_dispatch_order_dispatches', $user->company_id)) {
+        // Whoever can create a dispatch can submit it; approval (can_approve_order_dispatches) is the control.
+        if (!$this->hasPermission($request, 'can_create_order_dispatches', $user->company_id)
+            && !$this->hasPermission($request, 'can_dispatch_order_dispatches', $user->company_id)) {
             return response()->json([
                 'status' => 'failed',
                 'message' => 'Unauthorized to submit order dispatches for approval.',
@@ -777,7 +816,7 @@ class OrderDispatchController extends Controller
 
             $dispatch->logistic_id = $logistic->id;
             $dispatch->status = 'in_transit';
-            $dispatch->dispatched_at = now();
+            $dispatch->dispatch_date = now();
             $dispatch->save();
 
             DB::commit();
@@ -816,7 +855,7 @@ class OrderDispatchController extends Controller
             ], 403);
         }
 
-        $dispatch = OrderDispatch::with('items')->where('company_id', $user->company_id)->find($id);
+        $dispatch = OrderDispatch::with('items', 'logistic')->where('company_id', $user->company_id)->find($id);
 
         if (!$dispatch) {
             return response()->json([
@@ -830,6 +869,15 @@ class OrderDispatchController extends Controller
                 'success' => false,
                 'message' => 'Only in-transit dispatches can be marked as delivered',
             ], 409);
+        }
+
+        // Proof of delivery (the customer-stamped delivery note) must be on file
+        // before a dispatch can be closed out as delivered.
+        if (!$dispatch->logistic || !$dispatch->logistic->delivery_note_file) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Upload the stamped delivery note before marking this dispatch as delivered.',
+            ], 422);
         }
 
         $validator = Validator::make($request->all(), [
@@ -870,7 +918,7 @@ class OrderDispatchController extends Controller
             }
 
             $dispatch->status = 'delivered';
-            $dispatch->delivered_at = now();
+            $dispatch->actual_delivery_date = now();
             $dispatch->save();
 
             if ($dispatch->logistic) {

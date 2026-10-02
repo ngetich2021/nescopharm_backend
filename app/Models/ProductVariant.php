@@ -81,6 +81,11 @@ class ProductVariant extends Model
         return $this->belongsTo(Product::class);
     }
 
+    public function priceTiers()
+    {
+        return $this->hasMany(ProductPriceTier::class, 'variant_id');
+    }
+
     public function company()
     {
         return $this->belongsTo(Company::class);

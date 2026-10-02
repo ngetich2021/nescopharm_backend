@@ -402,7 +402,9 @@ class PayrollRunController extends Controller
             $filename = 'P10-' . $run->pay_year . '-' . str_pad($run->pay_month, 2, '0', STR_PAD_LEFT) . '.csv';
 
             // Build P10 CSV directly from payslips for accurate column mapping
-            $payslips = PayrollPayslip::where('payroll_run_id', $run->id)->with('employee')->get();
+            $payslips = PayrollPayslip::where('payroll_run_id', $run->id)
+                ->with(['employee:id,employee_number,first_name,last_name', 'employee.statutoryDetails'])
+                ->get();
 
             $headers = [
                 'Employee Name', 'KRA PIN', 'NSSF No', 'Basic Salary', 'Total Allowances',
@@ -421,7 +423,7 @@ class PayrollRunController extends Controller
                     $gross = bcadd((string) $p->gross_pay, (string) $p->total_allowances, 2);
                     fputcsv($out, [
                         ($emp->first_name ?? '') . ' ' . ($emp->last_name ?? ''),
-                        $emp->kra_pin ?? '', $emp->nssf_number ?? '',
+                        $emp->statutoryDetails?->kra_pin ?? '', $emp->statutoryDetails?->nssf_number ?? '',
                         $p->gross_pay, $p->total_allowances, $gross,
                         $p->taxable_pay, $p->paye, $p->personal_relief, $p->insurance_relief,
                         $p->nssf_employee, $p->nssf_employer, $p->shif,
@@ -474,7 +476,7 @@ class PayrollRunController extends Controller
         try {
             $run = PayrollRun::findOrFail($id);
             $payslips = PayrollPayslip::where('payroll_run_id', $run->id)
-                ->with('employee')
+                ->with(['employee:id,employee_number,first_name,last_name,department,position,basic_salary', 'employee.statutoryDetails'])
                 ->get();
 
             // Collect all unique allowance and deduction names across payslips
@@ -496,7 +498,7 @@ class PayrollRunController extends Controller
             }
 
             // Build headers with dynamic allowance/deduction columns
-            $headers = ['Employee No', 'First Name', 'Last Name', 'Department', 'Position', 'Basic Salary'];
+            $headers = ['Employee No', 'First Name', 'Last Name', 'Department', 'Position', 'KRA PIN', 'NSSF No', 'Basic Salary'];
 
             // Allowance columns
             foreach ($allAllowanceNames as $name) {
@@ -543,6 +545,8 @@ class PayrollRunController extends Controller
                     $emp->last_name ?? '',
                     $emp->department ?? '',
                     $emp->position ?? '',
+                    $emp->statutoryDetails?->kra_pin ?? '',
+                    $emp->statutoryDetails?->nssf_number ?? '',
                     $p->gross_pay,
                 ];
 

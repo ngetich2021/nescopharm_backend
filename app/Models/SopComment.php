@@ -24,6 +24,10 @@ class SopComment extends Model
         'comment_type',
         'comment',
         'metadata',
+        'file_path',
+        'file_name',
+        'file_type',
+        'file_size',
     ];
 
     protected $casts = [

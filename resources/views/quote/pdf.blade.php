@@ -3,131 +3,118 @@
 <head>
     <meta charset="utf-8">
     <title>Quote #{{ $quote->quote_number }}</title>
-    <link href="https://fonts.googleapis.com/css2?family=Figtree:wght@400;500;600;700&display=swap" rel="stylesheet">
     <style>
-body { font-family: 'Figtree'; background: #fff; }
-        .quote-box {
-            max-width: 760px;
-            margin: 24px auto;
-            padding: 36px 32px 32px 32px;
-        }
-        .flex-row { display: flex; justify-content: space-between; align-items: flex-start; }
-        .company-logo {
-            width: 56px; height: 56px; border-radius: 8px; background: #111827; color: #fff;
-            display: flex; align-items: flex-start; justify-content: center; font-size: 2rem; font-weight: bold;
-            margin-right: 12px; margin-top: 0; margin-bottom: 0;
-        }
-        .company-info { margin-bottom: 0; margin-top: 0; }
-        .company-name { font-size: 1.3rem; font-weight: 700; color: #232c36; }
-        .company-type { color: #6b7280; font-size: 1rem; font-weight: 400; }
-        .quote-title { font-size: 2.1rem; font-weight: 700; color: #232c36; letter-spacing: 1px; text-align: right; }
-        .prepared-for { font-weight: 700; color: #232c36; font-size: 1.15rem; margin-bottom: 8px; }
-        .header-table { width: 100%; margin-top: 36px; margin-bottom: 12px; border-collapse: collapse; }
-        .header-table td { vertical-align: top; padding: 0; }
-        .header-left { width: 50%; }
-        .header-right { width: 50%; text-align: right; }
-        .header-right .label { font-weight: 500; color: #232c36; }
-        .header-right .value { font-weight: 600; color: #232c36; margin-left: 8px; }
-        .header-right .row { margin-bottom: 4px; font-size: 1.08rem; }
-        .items-table { width: 100%; border-collapse: collapse; margin-top: 32px; }
-        .items-table th, .items-table td { border-bottom: 1px solid #e5e7eb; padding: 10px 6px; }
-        .items-table th { background: none; color: #232c36; font-size: 1.05rem; font-weight: 600; }
-        .items-table th:nth-child(1), .items-table td:nth-child(1) { text-align: left; }
-        .items-table th:nth-child(2), .items-table th:nth-child(3), .items-table th:nth-child(4),
-        .items-table td:nth-child(2), .items-table td:nth-child(3), .items-table td:nth-child(4) { text-align: right; }
-        .items-table td { font-size: 1.05rem; }
-        .summary-table { width: 40%; float: right; margin-top: 18px; }
-        .summary-table td { padding: 4px 0; font-size: 1.05rem; }
-        .summary-table .total-label { font-weight: 700; font-size: 1.15rem; }
-        .summary-table .total-value { font-weight: 700; font-size: 1.15rem; }
-        .footer { margin-top: 56px; font-size: 1.05rem; color: #6b7280; }
-        .valid-until { margin-top: 20px; padding: 12px 20px; background: #fef3c7; border-radius: 8px; font-weight: 600; color: #92400e; }
-        .letterhead-banner { width: 100%; display: block; margin-bottom: 24px; }
+        body { font-family: DejaVu Sans, sans-serif; font-size: 11px; color: #1f2937; background: #fff; }
+        .quote-box { max-width: 760px; margin: 0 auto; padding: 16px 24px; }
+        .letterhead-banner { width: 100%; display: block; margin-bottom: 12px; }
+        .company-name { font-size: 18px; font-weight: bold; margin-bottom: 12px; }
+        .title-row { width: 100%; border-collapse: collapse; margin-bottom: 8px; }
+        .title-row td { padding: 0; vertical-align: bottom; }
+        .quote-title { font-size: 20px; font-weight: bold; letter-spacing: 1px; }
+        .info-table { width: 100%; border-collapse: collapse; margin-bottom: 14px; }
+        .info-table td { border: 1px solid #9ca3af; padding: 5px 7px; vertical-align: top; }
+        .info-table .label { font-weight: bold; width: 18%; background: #f9fafb; }
+        .items-table { width: 100%; border-collapse: collapse; }
+        .items-table th, .items-table td { border: 1px solid #9ca3af; padding: 5px 6px; vertical-align: top; }
+        .items-table th { background: #f3f4f6; font-weight: bold; text-align: left; font-size: 10px; }
+        .num { text-align: right; white-space: nowrap; }
+        .tax-tag { font-size: 9px; color: #4b5563; }
+        .total-row td { font-weight: bold; font-size: 12px; }
+        .vat-note { margin-top: 6px; font-size: 10px; color: #4b5563; text-align: right; }
+        .valid-until { margin-top: 16px; padding: 8px 12px; background: #fef3c7; font-weight: bold; color: #92400e; }
+        .footer { margin-top: 20px; color: #4b5563; }
     </style>
 </head>
 <body>
+@php
+    $company = $quote->company;
+    $customer = $quote->customer;
+    $rep = $quote->salesRep ?? $quote->originalSubmittedBy;
+    $repName = $rep ? trim($rep->first_name . ' ' . $rep->last_name) : '';
+    $clientName = $customer ? ($customer->business_name ?: $customer->name) : '';
+    $totals = $quote->vatBreakdown();
+    $currency = $quote->currency ?: 'KES';
+    $letterheadSrc = $company?->assetDataUri($company->letterhead_url);
+@endphp
     <div class="quote-box">
-        @php $hasLetterhead = isset($quote->company) && $quote->company->letterhead_url; @endphp
-        @if($hasLetterhead)
-            <img src="{{ $quote->company->letterhead_url }}" alt="{{ $quote->company->name }}" class="letterhead-banner"/>
+        @if($letterheadSrc)
+            <img src="{{ $letterheadSrc }}" alt="{{ $company->name }}" class="letterhead-banner"/>
+        @else
+            <div class="company-name">{{ $company->name ?? '' }}</div>
         @endif
-        <div class="flex-row" style="align-items: flex-start; margin-bottom: 0;">
-            @if($hasLetterhead)
-                {{-- Company identity already shown once, in the letterhead above --}}
-                <div></div>
-            @else
-                <div style="display: flex; align-items: flex-start; margin-top: 0; margin-bottom: 0;">
-                    @if(isset($quote->company) && $quote->company->logo_url)
-                        <img src="{{ $quote->company->logo_url }}" alt="Logo" class="company-logo" style="background: none;"/>
-                    @else
-                        <div class="company-logo">
-                            {{ strtoupper(substr($quote->company->name ?? 'C', 0, 1)) }}
-                        </div>
-                    @endif
-                    <div class="company-info" style="margin-left: 12px;">
-                        <div class="company-name">{{ $quote->company->name ?? 'Company Name' }}</div>
-                    </div>
-                </div>
-            @endif
-            <div class="quote-title" style="text-align: right; min-width: 180px; align-self: flex-start; margin-top: 0;">QUOTATION</div>
-        </div>
 
-        <table class="header-table">
+        <table class="title-row">
             <tr>
-                <td class="header-left">
-                    <div class="prepared-for">PREPARED FOR:</div>
-                    <div style="font-size: 1.08rem; font-weight: 500; color: #232c36;">
-                        {{ $quote->customer->name ?? '' }}<br>
-                        {{ $quote->customer->phone ?? '' }}
-                    </div>
-                </td>
-                <td class="header-right">
-                    <div class="row"><span class="label">Quote No.</span> <span class="value">{{ $quote->quote_number }}</span></div>
-                    <div class="row"><span class="label">Date:</span> <span class="value">{{ \Carbon\Carbon::parse($quote->created_at)->format('j M Y') }}</span></div>
-                    <div class="row"><span class="label">Valid Until:</span> <span class="value">{{ \Carbon\Carbon::parse($quote->valid_until)->format('j M Y') }}</span></div>
-                </td>
+                <td class="quote-title">QUOTATION</td>
+                <td style="text-align: right;">Date: <strong>{{ \Carbon\Carbon::parse($quote->created_at)->format('j M Y') }}</strong></td>
+            </tr>
+        </table>
+
+        <table class="info-table">
+            <tr>
+                <td class="label">Client Name:</td>
+                <td>{{ $clientName }}@if($customer && $customer->phone)<br>{{ $customer->phone }}@endif</td>
+                <td class="label">Quote No.:</td>
+                <td>{{ $quote->quote_number }}</td>
+            </tr>
+            <tr>
+                <td class="label">Sales Team Name:</td>
+                <td>{{ $repName ?: '-' }}</td>
+                <td class="label">Payment terms:</td>
+                <td><strong>{{ $quote->paymentTermsLabel() }}</strong></td>
             </tr>
         </table>
 
         <table class="items-table">
             <thead>
                 <tr>
+                    <th style="width: 12%;">Item Code</th>
                     <th>Item Description</th>
-                    <th>Quantity</th>
-                    <th>Unit Price</th>
-                    <th>Total</th>
+                    <th style="width: 12%;">Pack Size</th>
+                    <th class="num" style="width: 14%;">Unit Price incl. VAT ({{ $currency }})</th>
+                    <th class="num" style="width: 8%;">Order Qty</th>
+                    <th class="num" style="width: 15%;">Amount incl. VAT</th>
                 </tr>
             </thead>
             <tbody>
                 @foreach($quote->quoteItems as $item)
+                @php $vatRate = $item->taxInfo()['rate']; $vatFactor = 1 + $vatRate / 100; @endphp
                 <tr>
-                    <td>{{ $item->product->name ?? '' }}{{ $item->variant ? ' - ' . $item->variant->name : '' }}</td>
-                    <td>{{ number_format($item->quantity, 2) }}</td>
-                    <td>{{ $quote->currency }} {{ number_format($item->unit_price, 2) }}</td>
-                    <td>{{ $quote->currency }} {{ number_format($item->total_price, 2) }}</td>
+                    <td>{{ $item->itemCode() ?? '-' }}</td>
+                    <td>
+                        {{ $item->product->name ?? '' }}{{ $item->variant ? ' - ' . $item->variant->name : '' }}
+                        @if($vatRate > 0)
+                            <br><span style="display:inline-block; border:1px solid #6b7280; padding:0 4px; font-size:9px; font-weight:bold;">VAT {{ rtrim(rtrim(number_format($vatRate, 2), '0'), '.') }}% inclusive</span>
+                        @endif
+                    </td>
+                    <td>{{ $item->packSize() }}</td>
+                    <td class="num">{{ number_format((float) $item->unit_price * $vatFactor, 2) }}</td>
+                    <td class="num">{{ number_format((float) ($item->unit_quantity ?: $item->quantity)) }}</td>
+                    <td class="num">{{ number_format($item->netAmount() * $vatFactor, 2) }}</td>
                 </tr>
                 @endforeach
+                <tr>
+                    <td colspan="5" class="num">Subtotal</td>
+                    <td class="num">{{ number_format($totals['subtotal'], 2) }}</td>
+                </tr>
+                @if($totals['discount'] > 0)
+                <tr>
+                    <td colspan="5" class="num">Discount</td>
+                    <td class="num">-{{ number_format($totals['discount'], 2) }}</td>
+                </tr>
+                @endif
+                <tr>
+                    <td colspan="5" class="num">VAT</td>
+                    <td class="num">{{ number_format($totals['vat'], 2) }}</td>
+                </tr>
+                <tr class="total-row">
+                    <td colspan="5" class="num">Total ({{ $currency }})</td>
+                    <td class="num">{{ number_format($totals['total'], 2) }}</td>
+                </tr>
             </tbody>
         </table>
 
-        <table class="summary-table">
-            <tr>
-                <td>Subtotal</td>
-                <td style="text-align:right;">{{ $quote->currency }} {{ number_format($quote->total_amount, 2) }}</td>
-            </tr>
-            @if($quote->discount > 0)
-            <tr>
-                <td>Discount</td>
-                <td style="text-align:right;">-{{ $quote->currency }} {{ number_format($quote->discount, 2) }}</td>
-            </tr>
-            @endif
-            <tr>
-                <td class="total-label">Total</td>
-                <td class="total-value" style="text-align:right;">{{ $quote->currency }} {{ number_format($quote->final_amount, 2) }}</td>
-            </tr>
-        </table>
-
-        <div style="clear: both;"></div>
+        <div class="vat-note">Unit prices and amounts are inclusive of VAT.</div>
 
         @if($quote->valid_until)
         <div class="valid-until">
@@ -135,17 +122,14 @@ body { font-family: 'Figtree'; background: #fff; }
         </div>
         @endif
 
-        @if($quote->notes)
         <div class="footer">
-            <div style="font-weight: 600; margin-bottom: 8px;">Notes:</div>
-            <div>{{ $quote->notes }}</div>
+            @if($quote->notes)
+                <div style="font-weight: bold; margin-bottom: 4px;">Notes:</div>
+                <div>{{ $quote->notes }}</div>
+            @else
+                <div>Thank you for considering our quotation.</div>
+            @endif
         </div>
-        @else
-        <div class="footer">
-            <div style="margin-top: 8px;">Thank you for considering our quotation.</div>
-        </div>
-        @endif
-        
     </div>
 </body>
 </html>

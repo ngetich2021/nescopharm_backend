@@ -33,38 +33,5 @@ class DatabaseServiceProvider extends ServiceProvider
                 ]);
             }
         });
-
-        // Ensure PDO settings are correctly applied after connection
-        // This is a safety net in case connections are created dynamically
-        DB::connection()->getPdo();
-        
-        // Verify the critical PDO settings for Supabase PgBouncer compatibility
-        $this->verifyPdoSettings();
-    }
-
-    /**
-     * Verify that PDO is configured correctly for Supabase PgBouncer
-     */
-    protected function verifyPdoSettings(): void
-    {
-        try {
-            $pdo = DB::connection()->getPdo();
-            
-            // Check if emulated prepares is enabled
-            $emulatedPrepares = $pdo->getAttribute(\PDO::ATTR_EMULATE_PREPARES);
-            
-            if (!$emulatedPrepares) {
-                Log::warning('PDO::ATTR_EMULATE_PREPARES is disabled. This may cause prepared statement errors with PgBouncer.');
-                
-                // Attempt to fix it
-                $pdo->setAttribute(\PDO::ATTR_EMULATE_PREPARES, true);
-                Log::info('PDO::ATTR_EMULATE_PREPARES has been enabled at runtime.');
-            }
-            
-        } catch (\Exception $e) {
-            Log::error('Failed to verify PDO settings', [
-                'error' => $e->getMessage()
-            ]);
-        }
     }
 }

@@ -58,7 +58,7 @@ class DailyWorkReportController extends Controller
         $user = $request->user();
         $canViewAll = $this->hasPermission($request, 'can_approve_daily_reports', $user->company_id);
 
-        $query = DailyWorkReport::with(['employee', 'approver', 'approvedBy'])
+        $query = DailyWorkReport::with(['employee', 'approver', 'approvedBy', 'createdBy.role'])
             ->where('company_id', $user->company_id);
 
         if (!$canViewAll) {
@@ -114,10 +114,18 @@ class DailyWorkReportController extends Controller
             return response()->json(['status' => 'failed', 'message' => 'Unauthorized.'], 403);
         }
 
+        $validator = Validator::make($request->all(), [
+            'remarks' => 'nullable|string',
+        ]);
+        if ($validator->fails()) {
+            return response()->json(['status' => 'failed', 'message' => $validator->errors()], 422);
+        }
+
         $report->update([
             'status' => 'approved',
             'approved_by' => $request->user()->id,
             'approved_at' => now(),
+            'remarks' => $request->input('remarks'),
             'rejection_reason' => null,
         ]);
         $report->load('employee', 'approver', 'approvedBy');
@@ -142,6 +150,7 @@ class DailyWorkReportController extends Controller
 
         $validator = Validator::make($request->all(), [
             'reason' => 'nullable|string',
+            'remarks' => 'nullable|string',
         ]);
         if ($validator->fails()) {
             return response()->json(['status' => 'failed', 'message' => $validator->errors()], 422);
@@ -152,6 +161,7 @@ class DailyWorkReportController extends Controller
             'approved_by' => $request->user()->id,
             'approved_at' => now(),
             'rejection_reason' => $request->input('reason'),
+            'remarks' => $request->input('remarks'),
         ]);
         $report->load('employee', 'approver', 'approvedBy');
 
@@ -168,16 +178,23 @@ class DailyWorkReportController extends Controller
         $approver = $r->approver;
         $approvedBy = $r->approvedBy;
 
+        // Use creator's role as fallback if designation is empty
+        $designation = $r->designation;
+        if (!$designation && $r->createdBy && $r->createdBy->role) {
+            $designation = $r->createdBy->role->name;
+        }
+
         return [
             'id' => $r->id,
             'employee_id' => $r->employee_id,
             'employee' => $employee ? trim($employee->first_name . ' ' . $employee->last_name) : '',
             'reportDate' => optional($r->report_date)->format('Y-m-d'),
-            'designation' => $r->designation,
+            'designation' => $designation,
             'department' => $r->department,
             'entries' => $r->entries ?? [],
             'keyAchievements' => $r->key_achievements,
             'pendingWork' => $r->pending_work,
+            'remarks' => $r->remarks,
             'status' => $r->status,
             'approverRole' => $r->approver_role,
             'approver' => $approver ? trim($approver->first_name . ' ' . $approver->last_name) : null,

@@ -122,6 +122,56 @@ class ProductController extends Controller
      * Validate that a set of prices (selling price, last price, variant prices, tier prices)
      * all exceed the minimum valid price. Returns an array of error strings (empty if all pass).
      */
+    /**
+     * Price-floor errors for a product create/update payload. Mirrors what actually gets saved:
+     * variant rows only count on products with variations, blank rows are skipped (the save
+     * skips them too), and each variant is measured against its own cost when it has one.
+     */
+    protected function collectPriceFloorErrors(Request $request, bool $hasVariations, ?float $unitCost, ?float $shippingCost, ?float $logisticsCost, ?float $marginAmount, $price, $lastPrice): array
+    {
+        $minPrice = $this->computeMinimumValidPrice($unitCost, $shippingCost, $logisticsCost, $marginAmount);
+
+        // A variation product is priced per variant, so an unset parent price is fine;
+        // a last price of 0 means "no previous price".
+        $errors = $this->validatePricesAgainstMinimum($minPrice, [
+            'NSPV (selling price)' => ($hasVariations && (float) $price <= 0) ? null : $price,
+            'Last price' => ((float) $lastPrice > 0) ? $lastPrice : null,
+        ]);
+
+        foreach ((array) $request->input('price_tiers', []) as $tier) {
+            if (isset($tier['price'])) {
+                $errors = array_merge($errors, $this->validatePricesAgainstMinimum($minPrice, [
+                    ($tier['tier_name'] ?? 'Price tier') => $tier['price'],
+                ]));
+            }
+        }
+
+        if ($hasVariations) {
+            foreach ((array) $request->input('variations', []) as $variant) {
+                if (!is_array($variant) || (empty($variant['name']) && empty($variant['sku']) && empty($variant['price']))) {
+                    continue;
+                }
+                if (!isset($variant['price'])) {
+                    continue;
+                }
+                $variantCost = (float) ($variant['cost'] ?? 0) > 0 ? (float) $variant['cost'] : $unitCost;
+                $variantMin = $this->computeMinimumValidPrice($variantCost, $shippingCost, $logisticsCost, $marginAmount);
+                $errors = array_merge($errors, $this->validatePricesAgainstMinimum($variantMin, [
+                    ('Variant "' . ($variant['name'] ?? '') . '" NSPV') => $variant['price'],
+                ]));
+                foreach ((array) ($variant['price_tiers'] ?? []) as $tier) {
+                    if (isset($tier['price'])) {
+                        $errors = array_merge($errors, $this->validatePricesAgainstMinimum($variantMin, [
+                            ('Variant "' . ($variant['name'] ?? '') . '" ' . ($tier['tier_name'] ?? 'price')) => $tier['price'],
+                        ]));
+                    }
+                }
+            }
+        }
+
+        return $errors;
+    }
+
     protected function validatePricesAgainstMinimum(float $minPrice, array $pricesToCheck): array
     {
         $errors = [];
@@ -140,11 +190,14 @@ class ProductController extends Controller
      * Create/update/delete a product's price tiers to match the given list.
      * Each tier: ['id' => optional existing id, 'tier_name' => string, 'price' => number]
      */
-    protected function syncPriceTiers(Product $product, ?array $tiers): void
+    protected function syncPriceTiers(Product $product, ?array $tiers, ?ProductVariant $variant = null): void
     {
         if ($tiers === null) {
             return;
         }
+
+        $scoped = fn () => ProductPriceTier::where('product_id', $product->id)
+            ->where(fn ($q) => $variant ? $q->where('variant_id', $variant->id) : $q->whereNull('variant_id'));
 
         $keepIds = [];
         foreach ($tiers as $tier) {
@@ -152,7 +205,7 @@ class ProductController extends Controller
                 continue;
             }
             $id = $tier['id'] ?? null;
-            $existing = $id ? ProductPriceTier::where('product_id', $product->id)->find($id) : null;
+            $existing = $id ? $scoped()->find($id) : null;
 
             if ($existing) {
                 $existing->update([
@@ -165,6 +218,7 @@ class ProductController extends Controller
                     'id' => (string) Str::uuid(),
                     'company_id' => $product->company_id,
                     'product_id' => $product->id,
+                    'variant_id' => $variant?->id,
                     'tier_name' => $tier['tier_name'],
                     'price' => $tier['price'],
                 ]);
@@ -173,9 +227,7 @@ class ProductController extends Controller
         }
 
         // Remove tiers that were dropped from the submitted list
-        ProductPriceTier::where('product_id', $product->id)
-            ->whereNotIn('id', $keepIds)
-            ->delete();
+        $scoped()->whereNotIn('id', $keepIds)->delete();
     }
 
     /**
@@ -208,7 +260,7 @@ class ProductController extends Controller
             ], 403);
         }
 
-        $query = Product::with(['store', 'company', 'category', 'variants', 'supplier', 'priceTiers']);
+        $query = Product::with(['store', 'company', 'category', 'variants.priceTiers', 'supplier', 'priceTiers']);
         $companyId = $user->company_id;
 
         // If user is system admin and explicitly requests another company
@@ -273,7 +325,7 @@ class ProductController extends Controller
 
         // Only load variants if has_variations is true
         if ($product->has_variations) {
-            $product->load('variants');
+            $product->load('variants.priceTiers');
         }
 
         // Load packaging units if configured
@@ -323,6 +375,9 @@ class ProductController extends Controller
             'allocated' => 'nullable|integer|min:0',
             'has_variations' => 'nullable',
             'variations' => 'nullable|array',
+            'variations.*.price_tiers' => 'nullable|array',
+            'variations.*.price_tiers.*.tier_name' => 'required|string|max:100',
+            'variations.*.price_tiers.*.price' => 'required|numeric|min:0',
             'images' => 'nullable|array',
             'tags' => 'nullable|array',
             // Packaging fields
@@ -408,34 +463,16 @@ class ProductController extends Controller
 
             // Enforce: price / last price / variant prices / tier prices must exceed
             // (unit cost + shipping cost + logistics cost + margin amount).
-            $minPrice = $this->computeMinimumValidPrice(
+            $priceErrors = $this->collectPriceFloorErrors(
+                $request,
+                filter_var($request->input('has_variations'), FILTER_VALIDATE_BOOLEAN),
                 $productData['unit_cost'] ?? null,
                 $productData['shipping_cost'] ?? null,
                 $productData['logistics_cost'] ?? null,
-                $productData['margin_amount'] ?? null
+                $productData['margin_amount'] ?? null,
+                $productData['price'] ?? null,
+                $productData['last_price'] ?? null
             );
-            $priceErrors = $this->validatePricesAgainstMinimum($minPrice, [
-                'Selling price' => $productData['price'] ?? null,
-                'Last price' => $productData['last_price'] ?? null,
-            ]);
-            if (is_array($request->input('price_tiers'))) {
-                foreach ($request->input('price_tiers') as $tier) {
-                    if (isset($tier['price'])) {
-                        $priceErrors = array_merge($priceErrors, $this->validatePricesAgainstMinimum($minPrice, [
-                            ($tier['tier_name'] ?? 'Price tier') => $tier['price'],
-                        ]));
-                    }
-                }
-            }
-            if (is_array($request->input('variations'))) {
-                foreach ($request->input('variations') as $variant) {
-                    if (isset($variant['price'])) {
-                        $priceErrors = array_merge($priceErrors, $this->validatePricesAgainstMinimum($minPrice, [
-                            ('Variant "' . ($variant['name'] ?? '') . '" price') => $variant['price'],
-                        ]));
-                    }
-                }
-            }
             if (!empty($priceErrors)) {
                 return response()->json([
                     'status' => 'failed',
@@ -544,11 +581,14 @@ class ProductController extends Controller
                     } else {
                         $variantData['is_active'] = 'true'; // Default to active
                     }
-                    ProductVariant::create(array_merge($variantData, [
+                    $variantTiers = $variantData['price_tiers'] ?? null;
+                    unset($variantData['price_tiers']);
+                    $variant = ProductVariant::create(array_merge($variantData, [
                         'id' => (string) Str::uuid(),
                         'product_id' => $product->id,
                         'company_id' => $request->input('company_id', $user->company_id),
                     ]));
+                    $this->syncPriceTiers($product, $variantTiers, $variant);
                 }
             }
 
@@ -570,7 +610,7 @@ class ProductController extends Controller
             }
 
             if ($product->has_variations) {
-                $product->load('variants');
+                $product->load('variants.priceTiers');
             }
             $product->load(['category', 'supplier']);
 
@@ -668,6 +708,10 @@ class ProductController extends Controller
             // variations.*.stock_quantity is intentionally NOT accepted here either - same rule
             // applies to variant stock as to base product stock.
             'variations.*.store_id' => 'nullable|uuid|exists:stores,id',
+            'variations.*.price_tiers' => 'nullable|array',
+            'variations.*.price_tiers.*.id' => 'nullable|uuid',
+            'variations.*.price_tiers.*.tier_name' => 'required|string|max:100',
+            'variations.*.price_tiers.*.price' => 'required|numeric|min:0',
             'images' => 'nullable|array',
             'tags' => 'nullable|array',
             // Packaging fields
@@ -760,34 +804,18 @@ class ProductController extends Controller
             // Enforce: price / last price / variant prices / tier prices must exceed
             // (unit cost + shipping cost + logistics cost + margin amount), using whichever
             // of these values are being submitted vs. already on the product.
-            $minPrice = $this->computeMinimumValidPrice(
+            $priceErrors = $this->collectPriceFloorErrors(
+                $request,
+                $request->has('has_variations')
+                    ? filter_var($request->input('has_variations'), FILTER_VALIDATE_BOOLEAN)
+                    : (bool) $product->has_variations,
                 $updateData['unit_cost'] ?? $product->unit_cost,
                 $updateData['shipping_cost'] ?? $product->shipping_cost,
                 $updateData['logistics_cost'] ?? $product->logistics_cost,
-                $updateData['margin_amount'] ?? $product->margin_amount
+                $updateData['margin_amount'] ?? $product->margin_amount,
+                $updateData['price'] ?? null,
+                $updateData['last_price'] ?? null
             );
-            $priceErrors = $this->validatePricesAgainstMinimum($minPrice, [
-                'Selling price' => $updateData['price'] ?? null,
-                'Last price' => $updateData['last_price'] ?? null,
-            ]);
-            if (is_array($request->input('price_tiers'))) {
-                foreach ($request->input('price_tiers') as $tier) {
-                    if (isset($tier['price'])) {
-                        $priceErrors = array_merge($priceErrors, $this->validatePricesAgainstMinimum($minPrice, [
-                            ($tier['tier_name'] ?? 'Price tier') => $tier['price'],
-                        ]));
-                    }
-                }
-            }
-            if (is_array($request->input('variations'))) {
-                foreach ($request->input('variations') as $variant) {
-                    if (isset($variant['price'])) {
-                        $priceErrors = array_merge($priceErrors, $this->validatePricesAgainstMinimum($minPrice, [
-                            ('Variant "' . ($variant['name'] ?? '') . '" price') => $variant['price'],
-                        ]));
-                    }
-                }
-            }
             if (!empty($priceErrors)) {
                 return response()->json([
                     'status' => 'failed',
@@ -884,6 +912,9 @@ class ProductController extends Controller
                     ) {
                         continue;
                     }
+                    $variantTiers = $variantData['price_tiers'] ?? null;
+                    unset($variantData['price_tiers']);
+                    $variant = null;
                     $variantId = $variantData['id'] ?? null;
                     if ($variantId) {
                         // Check if this is a valid UUID and exists in database
@@ -917,7 +948,7 @@ class ProductController extends Controller
                                     'variant_id' => $variantId,
                                     'product_id' => $product->id
                                 ]);
-                                $this->createNewVariant($variantData, $product);
+                                $variant = $this->createNewVariant($variantData, $product);
                             }
                         } else {
                             // Invalid UUID format - this is likely a temporary frontend ID, create new variant
@@ -925,15 +956,16 @@ class ProductController extends Controller
                                 'temp_id' => $variantId,
                                 'product_id' => $product->id
                             ]);
-                            $this->createNewVariant($variantData, $product);
+                            $variant = $this->createNewVariant($variantData, $product);
                         }
                     } else {
                         // No ID provided - create new variant
                         Log::info('No ID provided, creating new variant', [
                             'product_id' => $product->id
                         ]);
-                        $this->createNewVariant($variantData, $product);
+                        $variant = $this->createNewVariant($variantData, $product);
                     }
+                    $this->syncPriceTiers($product, $variantTiers, $variant);
                 }
             }
             // Clean up any variants that might have been left in an invalid state
@@ -972,7 +1004,7 @@ class ProductController extends Controller
 
             // Conditionally load variants based on has_variations
             if ($product->has_variations) {
-                $product->load('variants');
+                $product->load('variants.priceTiers');
             }
             $product->load(['category', 'supplier']);
 
@@ -1438,7 +1470,7 @@ class ProductController extends Controller
 
                 // Conditionally load variants based on has_variations
                 if ($product->has_variations) {
-                    $product->load('variants');
+                    $product->load('variants.priceTiers');
                 }
                 $product->load(['category', 'supplier']);
 

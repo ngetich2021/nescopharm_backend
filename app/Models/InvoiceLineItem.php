@@ -96,6 +96,16 @@ class InvoiceLineItem extends Model
         $this->line_total = $discountedSubtotal + $this->tax_amount;
     }
 
+    public function itemCode(): ?string
+    {
+        return $this->variant?->sku ?: ($this->product?->product_code ?: $this->product?->sku);
+    }
+
+    public function unitPriceInclTax(): float
+    {
+        return (float) $this->unit_price * (1 + (float) $this->tax_rate / 100);
+    }
+
     public function getSubtotalAttribute()
     {
         return $this->quantity * $this->unit_price;

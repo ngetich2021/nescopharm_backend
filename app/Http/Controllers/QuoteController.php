@@ -22,7 +22,6 @@ use Illuminate\Support\Facades\DB;
 use App\Http\Traits\HandlesDatabaseErrors;
 use App\Http\Traits\ChecksStockAvailability;
 use App\Services\PackagingCalculatorService;
-use App\Services\CustomerCreditTermsResolver;
 
 class QuoteController extends Controller
 {
@@ -30,16 +29,14 @@ class QuoteController extends Controller
     use ChecksStockAvailability;
 
     protected $calculator;
-    protected CustomerCreditTermsResolver $creditTermsResolver;
 
     /**
      * Initialize the controller with middleware for authentication.
      */
-    public function __construct(PackagingCalculatorService $calculator, CustomerCreditTermsResolver $creditTermsResolver)
+    public function __construct(PackagingCalculatorService $calculator)
     {
         $this->middleware('auth:sanctum');
         $this->calculator = $calculator;
-        $this->creditTermsResolver = $creditTermsResolver;
     }
 
     /**
@@ -114,6 +111,7 @@ class QuoteController extends Controller
     {
         $validator = Validator::make($request->all(), [
             'customer_id' => 'nullable|uuid|exists:customers,id',
+            'sales_rep_id' => 'nullable|uuid|exists:users,id',
             'discount' => 'nullable|numeric|min:0|max:999999.99',
             'status' => 'required|string|in:pending,approved,rejected,expired',
             'delivery_location_id' => 'nullable|uuid|exists:delivery_locations,id',
@@ -351,6 +349,7 @@ class QuoteController extends Controller
                     'quote_number' => $quoteNumber,
                     'customer_id' => $request->input('customer_id'),
                     'company_id' => $user->company_id,
+                    'sales_rep_id' => $request->input('sales_rep_id'),
                     'submitted_by_id' => $isRepSubmission ? $user->id : null,
                     'submitted_at' => $isRepSubmission ? now() : null,
                     'original_submitted_by_id' => $isRepSubmission ? $user->id : null,
@@ -403,6 +402,8 @@ class QuoteController extends Controller
                         'company_id' => $user->company_id,
                     ]);
                 }
+
+                $quote->syncTotals();
 
                 $message = 'Quote created successfully.';
                 if ($belowMinimumPrice) {
@@ -651,6 +652,8 @@ class QuoteController extends Controller
                 }
 
                 $quote->save();
+                $quote->unsetRelation('quoteItems');
+                $quote->syncTotals();
 
                 return response()->json([
                     'status' => 'success',
@@ -678,9 +681,6 @@ class QuoteController extends Controller
             'delivery_location_id' => 'nullable|uuid|exists:delivery_locations,id',
             'delivery_instructions' => 'nullable|string',
             'sales_rep_id' => 'nullable|uuid|exists:users,id',
-            'payment_option' => 'sometimes|in:instant,credit',
-            'payment_terms' => 'nullable|string',
-            'due_date' => 'nullable|date',
         ]);
 
         if ($validator->fails()) {
@@ -777,40 +777,15 @@ class QuoteController extends Controller
                 // Generate order number
                 $orderNumber = $this->generateOrderNumber($quote->company_id);
 
-                // Work out payment_type/credit_terms_days for the order, same as a
-                // directly-created order: an explicit instant/cash choice on conversion,
-                // otherwise the customer's own registered payment method/terms.
-                $paymentOption = $request->input('payment_option');
-                if ($paymentOption === 'instant' || !$quote->customer) {
-                    $orderCredit = ['payment_type' => 'cash', 'credit_terms_days' => null];
-                } else {
-                    $orderCredit = $this->creditTermsResolver->resolve(
-                        $quote->customer,
-                        now()->toDateString(),
-                        $request->input('due_date'),
-                        $request->input('payment_terms'),
-                    );
-                }
+                // Cash vs. credit is decided on the order itself (at invoice
+                // creation, where credit eligibility and limits are checked),
+                // never at quote conversion - start as cash until then.
+                $orderCredit = ['payment_type' => 'cash', 'credit_terms_days' => null];
 
-                // Enforce the customer's credit limit when converting on credit -
-                // this was the actual gap: nothing previously checked how much of
-                // the limit was already used, so a fully-exhausted (or 0-limit)
-                // customer could still have quotes converted into real orders.
-                // Skipped entirely for an explicit "instant" choice, since that
-                // isn't extending credit at all.
-                if ($orderCredit['payment_type'] === 'credit' && $quote->customer) {
-                    $availableCredit = $this->creditTermsResolver->getAvailableCredit($quote->customer);
-                    if ($availableCredit !== null && (float) $quote->total_amount > $availableCredit) {
-                        return response()->json([
-                            'status' => 'failed',
-                            'message' => sprintf(
-                                "This customer's available credit (KES %s) is not enough to cover this order (KES %s). Choose \"Pay Instant\" to proceed without using their credit limit, or increase their credit limit first.",
-                                number_format($availableCredit, 2),
-                                number_format((float) $quote->total_amount, 2)
-                            ),
-                        ], 422);
-                    }
-                }
+                // Recomputed from the items at the product's current rate, so the
+                // order carries the same subtotal/discount/VAT the quote shows.
+                $quote->loadMissing('quoteItems.product.vatCategory');
+                $totals = $quote->vatBreakdown();
 
                 // Create order
                 $order = Order::create([
@@ -822,14 +797,16 @@ class QuoteController extends Controller
                     // attributed to them for their own "my orders" history,
                     // even though the confirm() request itself never passes
                     // sales_rep_id explicitly.
-                    'sales_rep_id' => $request->input('sales_rep_id') ?: $quote->original_submitted_by_id,
+                    'sales_rep_id' => $request->input('sales_rep_id') ?: ($quote->sales_rep_id ?: $quote->original_submitted_by_id),
                     'payment_type' => $orderCredit['payment_type'],
                     'credit_terms_days' => $orderCredit['credit_terms_days'],
-                    'total_amount' => $quote->total_amount,
+                    'total_amount' => $totals['subtotal'],
+                    'discount' => $totals['discount'],
+                    'tax' => $totals['vat'],
                     'status' => 'pending',
                     'company_id' => $quote->company_id,
                     'notes' => $quote->notes,
-                    'final_amount' => $quote->total_amount,
+                    'final_amount' => $totals['total'],
                     'delivery_location_id' => $deliveryLocationId,
                     'amount_paid' => 0,
                     'currency' => 'KES', // Default, adjust as needed
@@ -838,6 +815,7 @@ class QuoteController extends Controller
 
                 // Create order items and update stock
                 foreach ($quote->quoteItems as $item) {
+                    $itemTaxRate = $item->taxInfo()['rate'];
                     OrderItem::create([
                         'id' => (string) Str::uuid(),
                         'order_id' => $order->id,
@@ -849,7 +827,10 @@ class QuoteController extends Controller
                         'base_quantity' => $item->base_quantity,
                         'packaging_breakdown' => $item->packaging_breakdown,
                         'unit_price' => $item->unit_price,
+                        'price_label' => $item->price_label,
                         'total_price' => $item->total_price,
+                        'tax_rate' => $itemTaxRate,
+                        'tax_amount' => round($item->netAmount() * $itemTaxRate / 100, 2),
                         'company_id' => $quote->company_id,
                     ]);
 
@@ -1091,9 +1072,19 @@ class QuoteController extends Controller
             $query = Quote::where('id', $id)
                 ->with([
                     'customer' => function ($query) {
-                        $query->select('id', 'name', 'email', 'phone');
+                        $query->select('id', 'name', 'email', 'phone', 'business_name', 'customer_type', 'payment_method', 'account_id')
+                            ->with(['account' => fn ($q) => $q->select('id', 'credit_days')]);
                     },
                     'submittedBy' => function ($query) {
+                        $query->select('id', 'first_name', 'last_name');
+                    },
+                    'salesRep' => function ($query) {
+                        $query->select('id', 'first_name', 'last_name', 'email');
+                    },
+                    'company' => function ($query) {
+                        $query->select('id', 'name', 'logo_url', 'letterhead_url');
+                    },
+                    'originalSubmittedBy' => function ($query) {
                         $query->select('id', 'first_name', 'last_name');
                     },
                     'deliveryLocation' => function ($query) {
@@ -1103,8 +1094,11 @@ class QuoteController extends Controller
                         $query->select('id', 'quote_id', 'product_id', 'variant_id', 'unit_id', 'quantity', 'unit_quantity', 'base_quantity', 'packaging_breakdown', 'unit_price', 'price_label', 'total_price')
                             ->with([
                                 'product' => function ($query) {
-                                    $query->select('id', 'name', 'price', 'store_id', 'has_packaging', 'base_unit')
+                                    $query->select('id', 'name', 'price', 'store_id', 'has_packaging', 'base_unit', 'unit_of_measurement', 'product_code', 'sku', 'is_taxable', 'tax_rate', 'vat_category_id')
                                         ->with([
+                                            'vatCategory' => function ($query) {
+                                                $query->select('id', 'etims_tax_type_code');
+                                            },
                                             'store' => function ($query) {
                                                 $query->select('id', 'name');
                                             },
@@ -1145,6 +1139,17 @@ class QuoteController extends Controller
                 ], 404);
             }
 
+            $quote->setAttribute('payment_terms', $quote->paymentTermsLabel());
+            $quote->setAttribute('totals', $quote->vatBreakdown());
+            foreach ($quote->quoteItems as $item) {
+                $tax = $item->taxInfo();
+                $item->setAttribute('item_code', $item->itemCode());
+                $item->setAttribute('pack_size', $item->packSize());
+                $item->setAttribute('tax_label', $tax['label']);
+                $item->setAttribute('tax_rate', $tax['rate']);
+                $item->setAttribute('tax_amount', round($item->netAmount() * $tax['rate'] / 100, 2));
+            }
+
             return response()->json([
                 'status' => 'success',
                 'quote' => $quote,
@@ -1156,6 +1161,51 @@ class QuoteController extends Controller
                 'message' => 'Failed to retrieve quote details: ' . $e->getMessage(),
             ], 500);
         }
+    }
+
+    public function salesReps(Request $request)
+    {
+        $user = $request->user();
+        if (!$this->hasPermission($request, 'can_view_quotes', $user->company_id)) {
+            return response()->json(['status' => 'failed', 'message' => 'Unauthorized to view quotes.'], 403);
+        }
+
+        $reps = \App\Models\User::where('company_id', $user->company_id)
+            ->whereHas('role', fn ($q) => $q->salesRep())
+            ->whereRaw('is_active = true')
+            ->select('id', 'first_name', 'last_name', 'email')
+            ->orderBy('first_name')
+            ->get();
+
+        return response()->json(['status' => 'success', 'data' => $reps]);
+    }
+
+    public function assignSalesRep(Request $request, $quoteId)
+    {
+        $user = $request->user();
+        if (!$this->hasPermission($request, 'can_update_quotes', $user->company_id)) {
+            return response()->json(['status' => 'failed', 'message' => 'Unauthorized to update quotes.'], 403);
+        }
+
+        $validator = Validator::make($request->all(), [
+            'sales_rep_id' => 'nullable|uuid|exists:users,id',
+        ]);
+        if ($validator->fails()) {
+            return response()->json(['status' => 'failed', 'message' => $validator->errors()], 422);
+        }
+
+        $quote = Quote::where('company_id', $user->company_id)->find($quoteId);
+        if (!$quote) {
+            return response()->json(['status' => 'failed', 'message' => 'Quote not found.'], 404);
+        }
+
+        $quote->update(['sales_rep_id' => $request->input('sales_rep_id')]);
+
+        return response()->json([
+            'status' => 'success',
+            'message' => $quote->sales_rep_id ? 'Sales rep assigned' : 'Sales rep cleared',
+            'data' => $quote->fresh(['salesRep:id,first_name,last_name,email']),
+        ]);
     }
 
     public function destroy(Request $request, $id)
@@ -1468,7 +1518,7 @@ class QuoteController extends Controller
         }
 
         try {
-            $quote = Quote::with(['customer', 'company', 'quoteItems.product', 'quoteItems.variant'])
+            $quote = Quote::with(['customer.account', 'company', 'salesRep', 'originalSubmittedBy', 'quoteItems.product.vatCategory', 'quoteItems.variant', 'quoteItems.packagingUnit'])
                 ->where('company_id', $user->company_id)
                 ->findOrFail($id);
 

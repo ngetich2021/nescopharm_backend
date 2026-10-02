@@ -33,8 +33,6 @@ class OrderDispatch extends Model
         'special_instructions',
         'created_by',
         'final_approved_at',
-        'dispatched_at',
-        'delivered_at',
     ];
 
     protected $casts = [
@@ -43,8 +41,6 @@ class OrderDispatch extends Model
         'estimated_delivery_date' => 'datetime',
         'actual_delivery_date' => 'datetime',
         'final_approved_at' => 'datetime',
-        'dispatched_at' => 'datetime',
-        'delivered_at' => 'datetime',
         'created_at' => 'datetime',
         'updated_at' => 'datetime',
     ];

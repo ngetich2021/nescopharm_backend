@@ -357,6 +357,152 @@ class InventoryBatch extends Model
     }
 
     /**
+     * Dispatch stock lifecycle — mirrors the on_hand -> stock_quantity
+     * reserve/finalize/release/return state machine used for product/variant
+     * stock, applied at the batch level: available -> allocated -> sold,
+     * with release/return paths back the other way.
+     */
+    public function allocateForDispatch($quantity, array $reference = [], $notes = null)
+    {
+        if ($quantity <= 0 || $this->quantity_available < $quantity) {
+            return false;
+        }
+
+        $before = $this->quantity_available;
+        $this->quantity_available -= $quantity;
+        $this->quantity_allocated += $quantity;
+        $this->save();
+
+        $this->movements()->create([
+            'id' => (string) Str::uuid(),
+            'company_id' => $this->company_id,
+            'store_id' => $this->store_id,
+            'product_id' => $this->product_id,
+            'variant_id' => $this->variant_id,
+            'type' => 'transfer_out',
+            'quantity' => -$quantity,
+            'quantity_before' => $before,
+            'quantity_after' => $this->quantity_available,
+            'unit_cost' => $this->unit_cost,
+            'unit_price' => $this->selling_price,
+            'reference_type' => $reference['reference_type'] ?? null,
+            'reference_id' => $reference['reference_id'] ?? null,
+            'reference_number' => $reference['reference_number'] ?? null,
+            'notes' => $notes ?? 'Allocated for dispatch',
+        ]);
+
+        return true;
+    }
+
+    public function releaseDispatchAllocation($quantity, array $reference = [], $notes = null)
+    {
+        if ($quantity <= 0) {
+            return false;
+        }
+
+        $quantity = min($quantity, $this->quantity_allocated);
+        if ($quantity <= 0) {
+            return false;
+        }
+
+        $before = $this->quantity_available;
+        $this->quantity_available += $quantity;
+        $this->quantity_allocated -= $quantity;
+        $this->save();
+
+        $this->movements()->create([
+            'id' => (string) Str::uuid(),
+            'company_id' => $this->company_id,
+            'store_id' => $this->store_id,
+            'product_id' => $this->product_id,
+            'variant_id' => $this->variant_id,
+            'type' => 'transfer_in',
+            'quantity' => $quantity,
+            'quantity_before' => $before,
+            'quantity_after' => $this->quantity_available,
+            'unit_cost' => $this->unit_cost,
+            'unit_price' => $this->selling_price,
+            'reference_type' => $reference['reference_type'] ?? null,
+            'reference_id' => $reference['reference_id'] ?? null,
+            'reference_number' => $reference['reference_number'] ?? null,
+            'notes' => $notes ?? 'Dispatch allocation released',
+        ]);
+
+        return true;
+    }
+
+    public function issueForDispatch($quantity, array $reference = [], $notes = null)
+    {
+        if ($quantity <= 0 || $this->quantity_allocated < $quantity) {
+            return false;
+        }
+
+        $before = $this->quantity_allocated;
+        $this->quantity_allocated -= $quantity;
+        $this->quantity_sold += $quantity;
+        $this->save();
+        $this->updateStatus();
+
+        $this->movements()->create([
+            'id' => (string) Str::uuid(),
+            'company_id' => $this->company_id,
+            'store_id' => $this->store_id,
+            'product_id' => $this->product_id,
+            'variant_id' => $this->variant_id,
+            'type' => 'transfer_out',
+            'quantity' => -$quantity,
+            'quantity_before' => $before,
+            'quantity_after' => $this->quantity_allocated,
+            'unit_cost' => $this->unit_cost,
+            'unit_price' => $this->selling_price,
+            'reference_type' => $reference['reference_type'] ?? null,
+            'reference_id' => $reference['reference_id'] ?? null,
+            'reference_number' => $reference['reference_number'] ?? null,
+            'notes' => $notes ?? 'Issued on dispatch acknowledgement',
+        ]);
+
+        return true;
+    }
+
+    public function returnFromDispatch($quantity, array $reference = [], $notes = null)
+    {
+        if ($quantity <= 0) {
+            return false;
+        }
+
+        $quantity = min($quantity, $this->quantity_sold);
+        if ($quantity <= 0) {
+            return false;
+        }
+
+        $before = $this->quantity_available;
+        $this->quantity_available += $quantity;
+        $this->quantity_sold -= $quantity;
+        $this->save();
+        $this->updateStatus();
+
+        $this->movements()->create([
+            'id' => (string) Str::uuid(),
+            'company_id' => $this->company_id,
+            'store_id' => $this->store_id,
+            'product_id' => $this->product_id,
+            'variant_id' => $this->variant_id,
+            'type' => 'transfer_in',
+            'quantity' => $quantity,
+            'quantity_before' => $before,
+            'quantity_after' => $this->quantity_available,
+            'unit_cost' => $this->unit_cost,
+            'unit_price' => $this->selling_price,
+            'reference_type' => $reference['reference_type'] ?? null,
+            'reference_id' => $reference['reference_id'] ?? null,
+            'reference_number' => $reference['reference_number'] ?? null,
+            'notes' => $notes ?? 'Dispatch item returned',
+        ]);
+
+        return true;
+    }
+
+    /**
      * Generate unique batch number
      */
     public static function generateBatchNumber($companyId, $productId)

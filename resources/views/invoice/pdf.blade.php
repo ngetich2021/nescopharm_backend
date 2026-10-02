@@ -32,9 +32,10 @@ body { font-family: 'Figtree'; background: #fff; }
         .items-table { width: 100%; border-collapse: collapse; margin-top: 32px; }
         .items-table th, .items-table td { border-bottom: 1px solid #e5e7eb; padding: 10px 6px; }
         .items-table th { background: none; color: #232c36; font-size: 1.05rem; font-weight: 600; }
-        .items-table th:nth-child(1), .items-table td:nth-child(1) { text-align: left; }
-        .items-table th:nth-child(2), .items-table th:nth-child(3), .items-table th:nth-child(4),
-        .items-table td:nth-child(2), .items-table td:nth-child(3), .items-table td:nth-child(4) { text-align: right; }
+        .items-table th:nth-child(1), .items-table td:nth-child(1),
+        .items-table th:nth-child(2), .items-table td:nth-child(2) { text-align: left; }
+        .items-table th:nth-child(3), .items-table th:nth-child(4), .items-table th:nth-child(5),
+        .items-table td:nth-child(3), .items-table td:nth-child(4), .items-table td:nth-child(5) { text-align: right; }
         .items-table td { font-size: 1.05rem; }
         .summary-table { width: 40%; float: right; margin-top: 18px; }
         .summary-table td { padding: 4px 0; font-size: 1.05rem; }
@@ -52,9 +53,12 @@ body { font-family: 'Figtree'; background: #fff; }
 </head>
 <body>
     <div class="invoice-box">
-        @php $hasLetterhead = isset($invoice->company) && $invoice->company->letterhead_url; @endphp
-        @if($hasLetterhead)
-            <img src="{{ $invoice->company->letterhead_url }}" alt="{{ $invoice->company->name }}" class="letterhead-banner"/>
+        @php
+            $letterheadSrc = isset($invoice->company) ? $invoice->company->assetDataUri($invoice->company->letterhead_url) : null;
+            $hasLetterhead = (bool) $letterheadSrc;
+        @endphp
+        @if($letterheadSrc)
+            <img src="{{ $letterheadSrc }}" alt="{{ $invoice->company->name }}" class="letterhead-banner"/>
         @endif
         <div class="flex-row" style="align-items: flex-start; margin-bottom: 0;">
             @if($hasLetterhead)
@@ -97,19 +101,26 @@ body { font-family: 'Figtree'; background: #fff; }
         <table class="items-table">
             <thead>
                 <tr>
+                    <th>Item Code</th>
                     <th>Item Description</th>
                     <th>Quantity</th>
-                    <th>Unit Price</th>
-                    <th>Total</th>
+                    <th>Unit Price (incl. VAT)</th>
+                    <th>Amount (incl. VAT)</th>
                 </tr>
             </thead>
             <tbody>
                 @foreach($invoice->lineItems as $item)
                 <tr>
-                    <td>{{ $item->description }}</td>
+                    <td>{{ $item->itemCode() ?? '-' }}</td>
+                    <td>
+                        {{ $item->description }}
+                        @if((float) $item->tax_rate > 0)
+                            <br><span style="display:inline-block; border:1px solid #6b7280; padding:0 4px; font-size:0.75rem; font-weight:600;">VAT {{ rtrim(rtrim(number_format($item->tax_rate, 2), '0'), '.') }}% inclusive</span>
+                        @endif
+                    </td>
                     <td>{{ number_format($item->quantity, 2) }}</td>
-                    <td>Ksh {{ number_format($item->unit_price, 2) }}</td>
-                    <td>Ksh {{ number_format($item->quantity * $item->unit_price, 2) }}</td>
+                    <td>Ksh {{ number_format($item->unitPriceInclTax(), 2) }}</td>
+                    <td>Ksh {{ number_format($item->line_total, 2) }}</td>
                 </tr>
                 @endforeach
             </tbody>
@@ -120,18 +131,16 @@ body { font-family: 'Figtree'; background: #fff; }
                 <td>Subtotal</td>
                 <td style="text-align:right;">Ksh {{ number_format($invoice->subtotal, 2) }}</td>
             </tr>
-            @if($invoice->tax_amount > 0)
-            <tr>
-                <td>Tax @if(isset($invoice->tax_rate) && $invoice->tax_rate > 0) ({{ rtrim(rtrim($invoice->tax_rate, '0'), '.') }}%) @endif</td>
-                <td style="text-align:right;">Ksh {{ number_format($invoice->tax_amount, 2) }}</td>
-            </tr>
-            @endif
             @if($invoice->discount_amount > 0)
             <tr>
                 <td>Discount</td>
                 <td style="text-align:right;">-Ksh {{ number_format($invoice->discount_amount, 2) }}</td>
             </tr>
             @endif
+            <tr>
+                <td>VAT</td>
+                <td style="text-align:right;">Ksh {{ number_format($invoice->tax_amount, 2) }}</td>
+            </tr>
             <tr>
                 <td class="total-label">Total</td>
                 <td class="total-value" style="text-align:right;">Ksh {{ number_format($invoice->total_amount, 2) }}</td>

@@ -22,6 +22,7 @@ class Dispatch extends Model
         'notes',
         'acknowledged_by',
         'returned_by',
+        'created_by',
     ];
 
     // Ensure proper casting for PostgreSQL dates
@@ -50,6 +51,11 @@ class Dispatch extends Model
     public function acknowledgedBy()
     {
         return $this->belongsTo(User::class, 'acknowledged_by');
+    }
+
+    public function createdBy()
+    {
+        return $this->belongsTo(User::class, 'created_by');
     }
 
        public function dispatchItems()

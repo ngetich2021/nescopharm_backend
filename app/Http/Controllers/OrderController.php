@@ -20,6 +20,7 @@ use Illuminate\Support\Str;
 use App\Http\Traits\HandlesDatabaseErrors;
 use App\Services\PackagingCalculatorService;
 use App\Services\CustomerCreditTermsResolver;
+use App\Services\TaxCompliance\EtimsTaxType;
 
 class OrderController extends Controller
 {
@@ -351,6 +352,7 @@ class OrderController extends Controller
 
             // Validate products/variants and calculate total amount
             $totalAmount = 0;
+            $totalTaxAmount = 0;
             $belowMinimumPrice = false;
             $items = $request->input('items');
             foreach ($items as $index => $item) {
@@ -452,30 +454,15 @@ class OrderController extends Controller
                 }
 
                 $totalAmount += $baseQuantity * $unitPrice;
-            }
-
-            // Calculate tax total before transaction to ensure we have it
-            $totalTaxAmount = 0;
-            foreach ($items as $item) {
-                $product = Product::find($item['product_id']);
-                $itemQuantity = (int) $item['quantity'];
-                $itemUnitPrice = $item['unit_price'];
-
-                $taxRate = 0;
-                if ($product->is_taxable) {
-                    $taxRate = $product->tax_rate ?? 0;
-                }
-
-                $itemTaxAmount = ($itemUnitPrice * $itemQuantity * $taxRate) / 100;
-                $totalTaxAmount += $itemTaxAmount;
+                $totalTaxAmount += $baseQuantity * $unitPrice * EtimsTaxType::rateForProduct($product) / 100;
             }
 
             return DB::transaction(function () use ($request, $user, $customer, $totalAmount, $items, $belowMinimumPrice, $totalTaxAmount, $orderCredit) {
                 $discount = $request->input('discount', 0);
-                // Use calculated tax if not provided manually (or overwrite manual if we want strict calculation - plan said overwrite/replace)
-                // The plan said: "The order.tax field currently accepts a manual input. This will be replaced/overwritten by the sum of calculated taxes from items."
-                // So we will use the calculated totalTaxAmount.
-                $tax = $totalTaxAmount;
+                // VAT is added on top of prices and always calculated from the
+                // items (never taken from the request); a discount reduces the
+                // taxable base proportionally.
+                $tax = round($totalAmount > 0 ? $totalTaxAmount * max(0, $totalAmount - $discount) / $totalAmount : 0, 2);
                 $finalAmount = $totalAmount - $discount + $tax;
 
                 if ($finalAmount < 0) {
@@ -566,8 +553,8 @@ class OrderController extends Controller
                         'unit_price' => $unitPrice,
                         'price_label' => $item['price_label'] ?? null,
                         'total_price' => $baseQuantity * $unitPrice,
-                        'tax_rate' => $product->is_taxable ? ($product->tax_rate ?? 0) : 0,
-                        'tax_amount' => ($unitPrice * $baseQuantity * ($product->is_taxable ? ($product->tax_rate ?? 0) : 0)) / 100,
+                        'tax_rate' => EtimsTaxType::rateForProduct($product),
+                        'tax_amount' => round($unitPrice * $baseQuantity * EtimsTaxType::rateForProduct($product) / 100, 2),
                         'company_id' => $user->company_id,
                     ]);
 
@@ -771,21 +758,14 @@ class OrderController extends Controller
                     }
                     // Update order totals
                     $discount = $request->input('discount', $order->discount ?? 0);
-                    $tax = $request->input('tax', $order->tax ?? 0);
 
-                    // Recalculate tax from items if we just updated them
-                    // But wait, we need to calculate tax for the NEW items loop below to get the total tax.
-                    // Let's do a preliminary loop to calculate total tax for the new items.
                     $newTotalTax = 0;
                     foreach ($items as $item) {
                         $product = Product::find($item['product_id']);
-                        $q = $item['quantity'];
-                        $p = $item['unit_price'];
-                        $r = $product->is_taxable ? ($product->tax_rate ?? 0) : 0;
-                        $newTotalTax += ($p * $q * $r) / 100;
+                        $newTotalTax += $item['unit_price'] * $item['quantity'] * EtimsTaxType::rateForProduct($product) / 100;
                     }
 
-                    $tax = $newTotalTax;
+                    $tax = round($totalAmount > 0 ? $newTotalTax * max(0, $totalAmount - $discount) / $totalAmount : 0, 2);
 
                     $finalAmount = $totalAmount - $discount + $tax;
                     if ($finalAmount < 0) {
@@ -828,8 +808,8 @@ class OrderController extends Controller
                             'unit_price' => $item['unit_price'],
                             'price_label' => $item['price_label'] ?? null,
                             'total_price' => $item['quantity'] * $item['unit_price'],
-                            'tax_rate' => $product->is_taxable ? ($product->tax_rate ?? 0) : 0,
-                            'tax_amount' => ($item['unit_price'] * $item['quantity'] * ($product->is_taxable ? ($product->tax_rate ?? 0) : 0)) / 100,
+                            'tax_rate' => EtimsTaxType::rateForProduct($product),
+                            'tax_amount' => round($item['unit_price'] * $item['quantity'] * EtimsTaxType::rateForProduct($product) / 100, 2),
                         ]);
                         if ($product->track_inventory) {
                             if ($variant) {
@@ -842,9 +822,13 @@ class OrderController extends Controller
                 }
 
                 if (($request->has('discount') || $request->has('tax')) && !$request->has('items')) {
+                    // Tax is never taken from the request - it's recomputed
+                    // from the order's items against the new discount.
                     $discount = $request->input('discount', $order->discount ?? 0);
-                    $tax = $request->input('tax', $order->tax ?? 0);
-                    $finalAmount = $order->total_amount - $discount + $tax;
+                    $subtotal = (float) $order->total_amount;
+                    $itemsTax = (float) $order->orderItems()->sum('tax_amount');
+                    $tax = round($subtotal > 0 ? $itemsTax * max(0, $subtotal - $discount) / $subtotal : 0, 2);
+                    $finalAmount = $subtotal - $discount + $tax;
                     if ($finalAmount < 0) {
                         return response()->json([
                             'status' => 'failed',

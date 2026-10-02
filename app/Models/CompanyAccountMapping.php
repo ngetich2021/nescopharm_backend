@@ -153,6 +153,8 @@ class CompanyAccountMapping extends Model
         'bank' => 'main_bank',
         'mpesa' => 'mpesa_float',
         'm-pesa' => 'mpesa_float',
+        'paybill' => 'mpesa_float',
+        'mobile_money' => 'mpesa_float',
         'card' => 'main_bank',
         'credit_card' => 'main_bank',
         'debit_card' => 'main_bank',

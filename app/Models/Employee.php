@@ -84,10 +84,21 @@ class Employee extends Model
     protected static function boot()
     {
         parent::boot();
-        
+
         static::creating(function ($model) {
             if (empty($model->id)) {
                 $model->id = (string) Str::uuid();
+            }
+        });
+
+        static::saving(function ($model) {
+            // Validate that termination_date is after hire_date
+            if ($model->termination_date && $model->hire_date) {
+                if ($model->termination_date < $model->hire_date) {
+                    throw new \InvalidArgumentException(
+                        "Termination date ({$model->termination_date}) cannot be before hire date ({$model->hire_date})"
+                    );
+                }
             }
         });
     }

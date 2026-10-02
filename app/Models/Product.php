@@ -283,7 +283,12 @@ class Product extends Model
 
     public function priceTiers()
     {
-        return $this->hasMany(ProductPriceTier::class, 'product_id');
+        return $this->hasMany(ProductPriceTier::class, 'product_id')->whereNull('variant_id');
+    }
+
+    public function receiptItems()
+    {
+        return $this->hasMany(ProductReceiptItem::class, 'product_id');
     }
 
     /**

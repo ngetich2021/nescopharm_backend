@@ -61,7 +61,7 @@ return [
                 // PgBouncer in transaction mode deallocates prepared statements when returning
                 // connections to the pool, causing "prepared statement does not exist" errors.
                 // Emulation solves this by handling prepares at the PHP level.
-                PDO::ATTR_EMULATE_PREPARES => env('DB_EMULATE_PREPARES', false),
+                PDO::ATTR_EMULATE_PREPARES => env('DB_EMULATE_PREPARES', true),
                 
                 // Enable exception mode for better error handling
                 PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,

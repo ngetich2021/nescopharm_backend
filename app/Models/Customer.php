@@ -28,9 +28,7 @@ class Customer extends Model
      */
     public function getTotalSpendAttribute(): string
     {
-        // Use loaded orders if available, otherwise query
-        $orders = $this->relationLoaded('orders') ? $this->orders : $this->orders()->get();
-        $sum = $orders->sum(function ($order) {
+        $sum = $this->ordersForTotals()->sum(function ($order) {
             return (float) $order->total_amount;
         });
         return number_format($sum, 2, '.', '');
@@ -42,9 +40,18 @@ class Customer extends Model
      */
     public function getTotalOrdersAttribute(): int
     {
-        // Use loaded orders if available, otherwise query
-        $orders = $this->relationLoaded('orders') ? $this->orders : $this->orders()->get();
-        return $orders->count();
+        return $this->ordersForTotals()->count();
+    }
+
+    private $ordersForTotalsCache = null;
+
+    // Cached outside the relation so the orders list isn't added to serialized output.
+    private function ordersForTotals()
+    {
+        if ($this->relationLoaded('orders')) {
+            return $this->orders;
+        }
+        return $this->ordersForTotalsCache ??= $this->orders()->get();
     }
 
     protected $table = 'customers';

@@ -54,6 +54,7 @@ class DispatchItem extends Model
         'dispatch_id',
         'product_id',
         'variant_id',
+        'batch_id',
         'quantity',
         'received_quantity',
         'notes',
@@ -86,5 +87,10 @@ class DispatchItem extends Model
     public function variant()
     {
         return $this->belongsTo(ProductVariant::class);
+    }
+
+    public function batch()
+    {
+        return $this->belongsTo(InventoryBatch::class, 'batch_id');
     }
 }

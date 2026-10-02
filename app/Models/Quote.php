@@ -82,6 +82,7 @@ class Quote extends Model
         'submitted_by_id',
         'submitted_at',
         'original_submitted_by_id',
+        'sales_rep_id',
         'total_amount',
         'status',
         'company_id',
@@ -128,6 +129,84 @@ class Quote extends Model
     public function originalSubmittedBy()
     {
         return $this->belongsTo(User::class, 'original_submitted_by_id');
+    }
+
+    public function salesRep()
+    {
+        return $this->belongsTo(User::class, 'sales_rep_id');
+    }
+
+    /**
+     * Credit customers get their approved credit days (30 if none set, same
+     * default as CustomerCreditTermsResolver); everyone else pays cash.
+     */
+    public function paymentTermsLabel(): string
+    {
+        $customer = $this->customer;
+        if (!$customer || $customer->payment_method !== 'credit') {
+            return 'Strictly cash';
+        }
+
+        $days = $customer->account?->credit_days ?? 30;
+        return "Strictly {$days} days";
+    }
+
+    /**
+     * Prices are before VAT; VAT is added on top. A quote-level discount
+     * reduces the taxable base, so each line's VAT is scaled by the same
+     * proportion the discount takes off the subtotal.
+     *
+     * @return array{subtotal: float, discount: float, vat: float, total: float, vat_lines: array<int, array{label: string, rate: float, taxable: float, amount: float}>}
+     */
+    public function vatBreakdown(): array
+    {
+        $subtotal = (float) $this->quoteItems->sum(fn (QuoteItem $item) => $item->netAmount());
+        $discount = min((float) $this->discount, $subtotal);
+        $factor = $subtotal > 0 ? ($subtotal - $discount) / $subtotal : 0.0;
+
+        $vatLines = $this->quoteItems
+            ->map(fn (QuoteItem $item) => ['tax' => $item->taxInfo(), 'net' => $item->netAmount() * $factor])
+            ->filter(fn ($row) => $row['tax']['rate'] > 0)
+            ->groupBy(fn ($row) => $row['tax']['code'])
+            ->map(function ($rows) {
+                $tax = $rows->first()['tax'];
+                $taxable = (float) $rows->sum('net');
+                return [
+                    'label' => $tax['label'],
+                    'rate' => $tax['rate'],
+                    'taxable' => round($taxable, 2),
+                    'amount' => round($taxable * $tax['rate'] / 100, 2),
+                ];
+            })
+            ->sortByDesc('rate')
+            ->values()
+            ->all();
+
+        $vat = round(array_sum(array_column($vatLines, 'amount')), 2);
+        $subtotal = round($subtotal, 2);
+        $discount = round($discount, 2);
+
+        return [
+            'subtotal' => $subtotal,
+            'discount' => $discount,
+            'vat' => $vat,
+            'total' => round($subtotal - $discount + $vat, 2),
+            'vat_lines' => $vatLines,
+        ];
+    }
+
+    /**
+     * Keep the stored final_amount (used by lists, credit checks and order
+     * conversion) equal to the VAT-inclusive grand total.
+     */
+    public function syncTotals(): void
+    {
+        $this->loadMissing('quoteItems.product.vatCategory');
+        $totals = $this->vatBreakdown();
+        $this->forceFill([
+            'total_amount' => $totals['subtotal'],
+            'final_amount' => $totals['total'],
+        ])->save();
     }
 
     public function customer()

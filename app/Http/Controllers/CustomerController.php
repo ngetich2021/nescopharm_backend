@@ -172,7 +172,7 @@ class CustomerController extends Controller
                     'region' => 'nullable|string|max:100',
                     'county' => 'nullable|string|max:100',
                     'nature_of_business' => 'nullable|string|max:255',
-                    'pin_number' => 'nullable|string|max:100',
+                    'pin_number' => 'nullable|required_if:customer_type,company|string|max:100',
                     'contact_person_name' => 'nullable|string|max:255',
                     'contact_person_phone' => 'nullable|string|max:50',
                     'contact_person_email' => 'nullable|email|max:255',
@@ -339,6 +339,16 @@ class CustomerController extends Controller
                 'status' => 'failed',
                 'message' => 'Unauthorized to edit customers.',
             ], 403);
+        }
+
+        // Company KRA PIN is printed on every invoice, so it can't be blank.
+        $effectiveType = $request->input('customer_type', $customer->customer_type);
+        $effectivePin = trim((string) $request->input('pin_number', $customer->pin_number));
+        if ($effectiveType === 'company' && $effectivePin === '') {
+            return response()->json([
+                'status' => 'failed',
+                'message' => ['pin_number' => ['KRA PIN is required for company customers.']],
+            ], 400);
         }
 
         try {

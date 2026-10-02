@@ -4,10 +4,13 @@ namespace App\Http\Controllers;
 
 use App\Http\Traits\ChecksStockAvailability;
 use App\Models\Dispatch;
+use App\Models\InventoryBatch;
 use App\Models\Product;
 use App\Models\ProductVariant;
+use App\Models\Requisition;
 use App\Models\Store;
 use App\Models\User;
+use Barryvdh\DomPDF\Facade\Pdf;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
@@ -57,6 +60,35 @@ class DispatchController extends Controller
             return true;
         }
         return $role->hasPermission($permission);
+    }
+
+    /**
+     * Validate that a chosen batch matches the dispatch item's product/variant/store
+     * and has enough available quantity. Returns the batch on success, or a string
+     * error message on failure.
+     */
+    protected function resolveDispatchBatch($batchId, $productId, $variantId, $storeId, $quantity)
+    {
+        $batch = InventoryBatch::find($batchId);
+        if (!$batch) {
+            return 'Batch not found.';
+        }
+        if ($batch->product_id !== $productId) {
+            return 'Batch does not belong to this product.';
+        }
+        if (($batch->variant_id ?: null) !== ($variantId ?: null)) {
+            return 'Batch does not match the selected variant.';
+        }
+        if ($batch->store_id !== $storeId) {
+            return 'Batch is not available in the selected store.';
+        }
+        if ($batch->status !== 'active') {
+            return 'Batch is not active.';
+        }
+        if ($batch->quantity_available < $quantity) {
+            return 'Insufficient available quantity in the selected batch.';
+        }
+        return $batch;
     }
 
 
@@ -148,6 +180,13 @@ class DispatchController extends Controller
             } else {
                 $product->increment('stock_quantity', $returnQty);
             }
+            if ($item->batch_id) {
+                $item->batch?->returnFromDispatch($returnQty, [
+                    'reference_type' => 'dispatch',
+                    'reference_id' => $dispatch->id,
+                    'reference_number' => $dispatch->dispatch_number,
+                ], $itemData['return_notes'] ?? ('Returned against dispatch ' . $dispatch->dispatch_number));
+            }
         }
         if (empty($updated)) {
             return response()->json([
@@ -236,6 +275,7 @@ class DispatchController extends Controller
             'items' => 'required|array|min:1',
             'items.*.product_id' => 'required|uuid|exists:products,id',
             'items.*.variant_id' => 'nullable|uuid|exists:product_variants,id',
+            'items.*.batch_id' => 'nullable|uuid|exists:inventory_batches,id',
             'items.*.quantity' => 'required|integer|min:1',
             'items.*.is_returnable' => 'boolean',
             'items.*.is_returned' => 'boolean',
@@ -273,6 +313,13 @@ class DispatchController extends Controller
                     } else {
                         $product->decrement('on_hand', $releaseQty);
                     }
+                    if ($oldItem->batch_id) {
+                        $oldItem->batch?->releaseDispatchAllocation($releaseQty, [
+                            'reference_type' => 'dispatch',
+                            'reference_id' => $dispatch->id,
+                            'reference_number' => $dispatch->dispatch_number,
+                        ], 'Dispatch ' . $dispatch->dispatch_number . ' edited');
+                    }
                 }
             }
 
@@ -289,9 +336,11 @@ class DispatchController extends Controller
                     ], 404);
                 }
                 if (!empty($item['variant_id'])) {
+                    // Variants aren't store-scoped in this schema (store_id is unset on
+                    // every variant) - per-store availability is tracked via InventoryBatch
+                    // instead, validated separately below when a batch_id is supplied.
                     $variant = \App\Models\ProductVariant::where('id', $item['variant_id'])
                         ->where('product_id', $item['product_id'])
-                        ->where('store_id', $data['from_store_id'])
                         ->lockForUpdate()
                         ->first();
                     if (!$variant) {
@@ -299,7 +348,7 @@ class DispatchController extends Controller
                         Log::warning('Update failed: Variant not found', ['index' => $index, 'variant_id' => $item['variant_id']]);
                         return response()->json([
                             'status' => 'failed',
-                            'message' => "Item at index {$index}: Variant not found in the specified store for this product."
+                            'message' => "Item at index {$index}: Variant not found for this product."
                         ], 404);
                     }
                     if ($variant->stock_quantity - $variant->on_hand < $item['quantity']) {
@@ -320,9 +369,26 @@ class DispatchController extends Controller
                         ], 422);
                     }
                 }
+                if (!empty($item['batch_id'])) {
+                    $batchOrError = $this->resolveDispatchBatch(
+                        $item['batch_id'],
+                        $item['product_id'],
+                        $item['variant_id'] ?? null,
+                        $data['from_store_id'],
+                        $item['quantity']
+                    );
+                    if (is_string($batchOrError)) {
+                        DB::rollBack();
+                        return response()->json([
+                            'status' => 'failed',
+                            'message' => "Item at index {$index}: {$batchOrError}"
+                        ], 422);
+                    }
+                }
                 $updatedItems[] = [
                     'product_id' => $item['product_id'],
                     'variant_id' => $item['variant_id'] ?? null,
+                    'batch_id' => $item['batch_id'] ?? null,
                     'quantity' => $item['quantity'],
                     'notes' => $item['notes'] ?? null,
                     'is_returnable' => $item['is_returnable'] ?? false,
@@ -358,6 +424,7 @@ class DispatchController extends Controller
                     'dispatch_id' => $dispatch->id,
                     'product_id' => $item['product_id'],
                     'variant_id' => $item['variant_id'],
+                    'batch_id' => $item['batch_id'] ?? null,
                     'quantity' => $item['quantity'],
                     'received_quantity' => 0,
                     'notes' => $item['notes'],
@@ -369,6 +436,14 @@ class DispatchController extends Controller
                     $variant->increment('on_hand', $item['quantity']);
                 } else {
                     $product->increment('on_hand', $item['quantity']);
+                }
+                if (!empty($item['batch_id'])) {
+                    $batch = InventoryBatch::find($item['batch_id']);
+                    $batch?->allocateForDispatch($item['quantity'], [
+                        'reference_type' => 'dispatch',
+                        'reference_id' => $dispatch->id,
+                        'reference_number' => $dispatch->dispatch_number,
+                    ], 'Dispatch ' . $dispatch->dispatch_number . ' edited');
                 }
             }
 
@@ -441,9 +516,11 @@ class DispatchController extends Controller
             'is_returnable' => 'boolean',
             'return_date' => 'nullable|date',
             'notes' => 'nullable|string',
+            'requisition_id' => 'nullable|uuid|exists:requisitions,id',
             'items' => 'required|array|min:1',
             'items.*.product_id' => 'required|uuid|exists:products,id',
             'items.*.variant_id' => 'nullable|uuid|exists:product_variants,id',
+            'items.*.batch_id' => 'nullable|uuid|exists:inventory_batches,id',
             'items.*.quantity' => 'required|integer|min:1',
         ]);
         // Custom validation: if is_returnable is true, return_date is required
@@ -465,6 +542,27 @@ class DispatchController extends Controller
         try {
             $user = $request->user();
             $companyId = $user->company_id;
+
+            // Linking the source requisition happens here, in the same transaction,
+            // so a dispatch can never exist without its requisition being marked
+            // dispatched (and dispatchers don't need general requisition-edit rights).
+            $requisition = null;
+            if (!empty($data['requisition_id'])) {
+                $requisition = Requisition::where('id', $data['requisition_id'])->lockForUpdate()->first();
+                $error = null;
+                if ($requisition->company_id !== $companyId) {
+                    $error = 'Requisition not found.';
+                } elseif ($requisition->approval_status !== 'approved') {
+                    $error = 'Only an approved requisition can be dispatched.';
+                } elseif ($requisition->dispatch_id) {
+                    $error = 'This requisition has already been dispatched.';
+                }
+                if ($error) {
+                    DB::rollBack();
+                    return response()->json(['status' => 'failed', 'message' => $error], 422);
+                }
+            }
+
             $dispatchNumber = $this->generateDispatchNumber($companyId);
             $items = $data['items'];
             foreach ($items as $index => $item) {
@@ -477,16 +575,18 @@ class DispatchController extends Controller
                     ], 404);
                 }
                 if (!empty($item['variant_id'])) {
+                    // Variants aren't store-scoped in this schema (store_id is unset on
+                    // every variant) - per-store availability is tracked via InventoryBatch
+                    // instead, validated separately below when a batch_id is supplied.
                     $variant = \App\Models\ProductVariant::where('id', $item['variant_id'])
                         ->where('product_id', $item['product_id'])
-                        ->where('store_id', $data['from_store_id'])
                         ->lockForUpdate()
                         ->first();
                     if (!$variant) {
                         DB::rollBack();
                         return response()->json([
                             'status' => 'failed',
-                            'message' => "Item at index {$index}: Variant not found in the specified store for this product."
+                            'message' => "Item at index {$index}: Variant not found for this product."
                         ], 404);
                     }
                     if ($variant->stock_quantity - $variant->on_hand < $item['quantity']) {
@@ -505,6 +605,22 @@ class DispatchController extends Controller
                         ], 422);
                     }
                 }
+                if (!empty($item['batch_id'])) {
+                    $batchOrError = $this->resolveDispatchBatch(
+                        $item['batch_id'],
+                        $item['product_id'],
+                        $item['variant_id'] ?? null,
+                        $data['from_store_id'],
+                        $item['quantity']
+                    );
+                    if (is_string($batchOrError)) {
+                        DB::rollBack();
+                        return response()->json([
+                            'status' => 'failed',
+                            'message' => "Item at index {$index}: {$batchOrError}"
+                        ], 422);
+                    }
+                }
             }
             $dispatch = Dispatch::create([
                 'id' => (string) Str::uuid(),
@@ -518,6 +634,7 @@ class DispatchController extends Controller
                 'is_returned' => false,
                 'notes' => $data['notes'] ?? null,
                 'acknowledged_by' => null,
+                'created_by' => $user->id,
             ]);
             foreach ($items as $item) {
                 $product = Product::find($item['product_id']);
@@ -527,6 +644,7 @@ class DispatchController extends Controller
                     'dispatch_id' => $dispatch->id,
                     'product_id' => $item['product_id'],
                     'variant_id' => $item['variant_id'] ?? null,
+                    'batch_id' => $item['batch_id'] ?? null,
                     'quantity' => $item['quantity'],
                     'received_quantity' => 0,
                     'notes' => $item['notes'] ?? null,
@@ -539,12 +657,26 @@ class DispatchController extends Controller
                 } else {
                     $product->increment('on_hand', $item['quantity']);
                 }
+                if (!empty($item['batch_id'])) {
+                    $batch = InventoryBatch::find($item['batch_id']);
+                    $batch?->allocateForDispatch($item['quantity'], [
+                        'reference_type' => 'dispatch',
+                        'reference_id' => $dispatch->id,
+                        'reference_number' => $dispatch->dispatch_number,
+                    ], 'Dispatch ' . $dispatch->dispatch_number);
+                }
+            }
+            if ($requisition) {
+                $requisition->update([
+                    'status' => 'dispatched',
+                    'dispatch_id' => $dispatch->id,
+                ]);
             }
             DB::commit();
             return response()->json([
                 'status' => 'success',
                 'message' => 'Dispatch created successfully.',
-                'dispatch' => $dispatch->load('dispatchItems.product', 'dispatchItems.variant')
+                'dispatch' => $dispatch->load('dispatchItems.product', 'dispatchItems.variant', 'dispatchItems.batch')
             ], 201);
         } catch (\Exception $e) {
             DB::rollBack();
@@ -634,6 +766,21 @@ class DispatchController extends Controller
                 } else {
                     $product->decrement('on_hand', $toAcknowledge);
                     $product->decrement('stock_quantity', $toAcknowledge);
+                }
+                if ($item->batch_id) {
+                    $batch = InventoryBatch::find($item->batch_id);
+                    $issued = $batch?->issueForDispatch($toAcknowledge, [
+                        'reference_type' => 'dispatch',
+                        'reference_id' => $dispatch->id,
+                        'reference_number' => $dispatch->dispatch_number,
+                    ], 'Acknowledged dispatch ' . $dispatch->dispatch_number);
+                    if ($batch && !$issued) {
+                        DB::rollBack();
+                        return response()->json([
+                            'status' => 'failed',
+                            'message' => 'Insufficient allocated quantity in batch for item: ' . $item->id,
+                        ], 422);
+                    }
                 }
                 $item->received_quantity = $newReceived;
                 $item->save();
@@ -727,6 +874,13 @@ class DispatchController extends Controller
                     } else {
                         $product->decrement('on_hand', $releaseQty);
                     }
+                    if ($item->batch_id) {
+                        $item->batch?->releaseDispatchAllocation($releaseQty, [
+                            'reference_type' => 'dispatch',
+                            'reference_id' => $dispatch->id,
+                            'reference_number' => $dispatch->dispatch_number,
+                        ], 'Dispatch ' . $dispatch->dispatch_number . ' deleted');
+                    }
                 }
             }
             // Optionally, log the deletion for audit
@@ -765,5 +919,60 @@ class DispatchController extends Controller
                 'message' => $e->getMessage()
             ], 500);
         }
+    }
+
+    /**
+     * Generate a printable "Requisition Note" for a dispatch — a goods-issue
+     * slip showing each item, the batch it was pulled from, and its expiry
+     * date, for warehouse traceability and handover.
+     */
+    public function printRequisitionNote(Request $request, $dispatchId)
+    {
+        $dispatch = Dispatch::with([
+            'dispatchItems.product',
+            'dispatchItems.variant',
+            'dispatchItems.batch',
+            'fromStore',
+            'toUser',
+            'createdBy',
+        ])->findOrFail($dispatchId);
+
+        $companyId = null;
+        if ($dispatch->fromStore && property_exists($dispatch->fromStore, 'company_id')) {
+            $companyId = $dispatch->fromStore->company_id;
+        } elseif ($dispatch->dispatchItems->count() > 0 && $dispatch->dispatchItems[0]->product && property_exists($dispatch->dispatchItems[0]->product, 'company_id')) {
+            $companyId = $dispatch->dispatchItems[0]->product->company_id;
+        }
+
+        if (!$this->hasPermission($request, 'can_view_dispatches')) {
+            return response()->json([
+                'status' => 'failed',
+                'message' => 'Unauthorized to view this dispatch.'
+            ], 403);
+        }
+
+        $requisition = Requisition::where('dispatch_id', $dispatch->id)
+            ->with(['requester', 'approver'])
+            ->first();
+
+        $company = \App\Models\Company::find(
+            $dispatch->fromStore?->company_id
+                ?? $dispatch->dispatchItems->first()?->product?->company_id
+                ?? $request->user()->company_id
+        );
+
+        $pdf = Pdf::loadView('requisitions.note', [
+            'dispatch' => $dispatch,
+            'requisition' => $requisition,
+            'company' => $company,
+        ])->setPaper('a4', 'portrait');
+
+        $filename = 'requisition-note-' . $dispatch->dispatch_number . '.pdf';
+
+        return response()->streamDownload(function () use ($pdf) {
+            echo $pdf->output();
+        }, $filename, [
+            'Content-Type' => 'application/pdf',
+        ]);
     }
 }

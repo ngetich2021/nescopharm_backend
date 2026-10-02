@@ -175,6 +175,7 @@ class EmployeeSelfServiceController extends Controller
 
     public function dailyReportStore(Request $request)
     {
+        $user = $request->user()->load('role');
         $employee = $this->resolveEmployee($request);
         if (!$employee) {
             return response()->json(['status' => 'failed', 'message' => 'No employee profile is linked to this login.'], 404);
@@ -195,7 +196,6 @@ class EmployeeSelfServiceController extends Controller
             'entries' => 'nullable|array',
             'entries.*.time' => 'nullable|string',
             'entries.*.activity' => 'nullable|string',
-            'entries.*.remarks' => 'nullable|string',
             'key_achievements' => 'nullable|string',
             'pending_work' => 'nullable|string',
         ]);
@@ -215,14 +215,17 @@ class EmployeeSelfServiceController extends Controller
             ], 422);
         }
 
-        $user = $request->user();
+        // Routing is based on the employee the report is for
         $routing = $this->resolveDailyReportApprover($employee, $user);
+
+        // Get designation from request, employee position, or user's role
+        $designation = $request->input('designation') ?: $employee->position ?: ($user->role?->name ?? null);
 
         $report = DailyWorkReport::create([
             'company_id' => $employee->company_id,
             'employee_id' => $employee->id,
             'report_date' => $request->report_date,
-            'designation' => $request->input('designation') ?: $employee->position,
+            'designation' => $designation,
             'department' => $request->input('department') ?: $employee->department,
             'entries' => $request->input('entries', []),
             'key_achievements' => $request->input('key_achievements'),
@@ -236,11 +239,41 @@ class EmployeeSelfServiceController extends Controller
         ]);
         $report->load('approver', 'approvedBy');
 
+        $routingMessage = $routing['auto_approve']
+            ? 'Your report has been self-certified as you are the Managing Director.'
+            : 'Routed automatically to the GM, or the Managing Director.';
+
         return response()->json([
             'status' => 'success',
             'message' => 'Daily work report submitted successfully.',
+            'routing_message' => $routingMessage,
             'daily_report' => (new DailyWorkReportController())->formatReport($report),
         ], 201);
+    }
+
+    public function dailyReportDestroy(Request $request, $id)
+    {
+        $user = $request->user();
+        $employee = $this->resolveEmployee($request);
+        if (!$employee) {
+            return response()->json(['status' => 'failed', 'message' => 'No employee profile is linked to this login.'], 404);
+        }
+
+        $report = DailyWorkReport::where('id', $id)
+            ->where('employee_id', $employee->id)
+            ->where('company_id', $user->company_id)
+            ->first();
+
+        if (!$report) {
+            return response()->json(['status' => 'failed', 'message' => 'Daily work report not found.'], 404);
+        }
+
+        $report->delete();
+
+        return response()->json([
+            'status' => 'success',
+            'message' => 'Daily work report deleted successfully.',
+        ], 200);
     }
 
     /**

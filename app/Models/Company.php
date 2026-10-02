@@ -30,6 +30,12 @@ class Company extends Model
         'website',
         'logo_url',
         'letterhead_url',
+        'bank_name',
+        'bank_account_name',
+        'bank_account_number',
+        'bank_branch',
+        'mpesa_paybill',
+        'mpesa_account_number',
         'is_active',
         'is_first_time',
         'current_subscription_id',
@@ -201,6 +207,26 @@ class Company extends Model
 
         $separator = str_contains($url, '?') ? '&' : '?';
         return $url . $separator . 'v=' . filemtime($path);
+    }
+
+    /**
+     * Inline the asset as a data URI for dompdf: it can't fetch remote URLs,
+     * and `php artisan serve` can't answer its own request mid-render anyway.
+     */
+    public function assetDataUri(?string $url): ?string
+    {
+        if (!$url) {
+            return null;
+        }
+
+        $filename = basename(parse_url($url, PHP_URL_PATH) ?? '');
+        $path = storage_path('app/company-assets/' . $filename);
+        if (!$filename || !is_file($path)) {
+            return null;
+        }
+
+        $mime = mime_content_type($path) ?: 'image/jpeg';
+        return 'data:' . $mime . ';base64,' . base64_encode(file_get_contents($path));
     }
 
 }

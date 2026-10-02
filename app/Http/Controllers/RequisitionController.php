@@ -284,6 +284,94 @@ class RequisitionController extends Controller
         ]);
     }
 
+    // Official Purpose PDF: in-stock items print as a "Samples Requisition", custom items as an
+    // "Office Maintenance Requisition" — the two are never combined into one document.
+    public function printOfficialPurpose(Request $request, $id)
+    {
+        $user = $request->user();
+        if (!$this->hasPermission($request, 'can_view_requisitions')) {
+            return response()->json([
+                'status' => 'failed',
+                'message' => 'Unauthorized to view requisitions.'
+            ], 403);
+        }
+
+        $type = $request->query('type');
+        if (!in_array($type, ['stock', 'custom'], true)) {
+            return response()->json([
+                'status' => 'failed',
+                'message' => "A valid type ('stock' or 'custom') is required."
+            ], 422);
+        }
+
+        $canManageAllCompanies = $this->canManageAllCompanies($request);
+        $canManageCompany = $this->hasPermission($request, 'can_manage_company', $user->company_id);
+
+        $requisition = Requisition::with(['items.product', 'items.variant', 'requester', 'company', 'approver'])
+            ->where('id', $id)
+            ->when(!$canManageAllCompanies, fn ($q) => $q->where('company_id', $user->company_id))
+            ->when(!$canManageAllCompanies && !$canManageCompany, fn ($q) => $q->where('requester_id', $user->id))
+            ->first();
+        if (!$requisition) {
+            return response()->json([
+                'status' => 'failed',
+                'message' => 'Requisition not found or not accessible.'
+            ], 404);
+        }
+
+        $dispatch = $requisition->dispatch_id
+            ? \App\Models\Dispatch::with(['dispatchItems.batch', 'fromStore', 'createdBy'])->find($requisition->dispatch_id)
+            : null;
+        $dispatchedByKey = $dispatch
+            ? $dispatch->dispatchItems->groupBy(fn ($di) => $di->product_id . '|' . ($di->variant_id ?? ''))
+            : collect();
+
+        $items = $requisition->items->filter(fn ($item) => $type === 'stock' ? (bool) $item->product_id : !$item->product_id);
+
+        if ($items->isEmpty()) {
+            return response()->json([
+                'status' => 'failed',
+                'message' => $type === 'stock'
+                    ? 'This requisition has no in-stock items to print a Samples Requisition for.'
+                    : 'This requisition has no custom items to print an Office Maintenance Requisition for.'
+            ], 422);
+        }
+
+        $rows = $items->map(function ($item) use ($dispatchedByKey, $dispatch) {
+            $isCustom = !$item->product_id;
+            $issuedLines = $isCustom ? collect() : $dispatchedByKey->get($item->product_id . '|' . ($item->variant_id ?? ''), collect());
+            $batches = $issuedLines->pluck('batch')->filter();
+
+            return [
+                'name' => $isCustom ? $item->custom_item_name : ($item->product->name ?? '—'),
+                'variant' => $item->variant->name ?? null,
+                'notes' => $item->notes,
+                'requested' => $item->quantity,
+                'issued' => $isCustom || !$dispatch ? null : (int) $issuedLines->sum('quantity'),
+                'batches' => $batches->pluck('batch_number')->unique()->implode(', '),
+                'expiries' => $batches->pluck('expiry_date')->filter()->map(fn ($d) => $d->format('d M Y'))->unique()->implode(', '),
+            ];
+        })->values()->all();
+
+        $docTitle = $type === 'stock' ? 'SAMPLES REQUISITION' : 'OFFICE MAINTENANCE REQUISITION';
+        $filenamePrefix = $type === 'stock' ? 'samples-requisition' : 'office-maintenance-requisition';
+
+        $pdf = \Barryvdh\DomPDF\Facade\Pdf::loadView('requisitions.official-purpose', [
+            'requisition' => $requisition,
+            'dispatch' => $dispatch,
+            'rows' => $rows,
+            'company' => $requisition->company,
+            'docTitle' => $docTitle,
+            'isCustomDoc' => $type === 'custom',
+        ])->setPaper('a4', 'portrait');
+
+        $filename = $filenamePrefix . '-' . $requisition->requisition_number . '.pdf';
+
+        return response()->streamDownload(fn () => print($pdf->output()), $filename, [
+            'Content-Type' => 'application/pdf',
+        ]);
+    }
+
     // Update a requisition (metadata only)
     public function update(Request $request, $id)
     {

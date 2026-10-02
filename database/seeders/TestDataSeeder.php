@@ -123,6 +123,38 @@ class TestDataSeeder extends Seeder
             'unit_of_measurement' => 'bottle',
         ]);
 
+        Product::create([
+            'id' => Str::uuid(),
+            'company_id' => $company->id,
+            'store_id' => $store->id,
+            'product_number' => 'PROD-0003',
+            'product_code' => 'FANTA-500',
+            'name' => 'Fanta Orange 500ml',
+            'description' => 'Fanta Orange 500ml bottle',
+            'price' => 45.00,
+            'unit_cost' => 32.00,
+            'stock_quantity' => 400,
+            'category_id' => $category->id,
+            'supplier_id' => $supplier->id,
+            'unit_of_measurement' => 'bottle',
+        ]);
+
+        Product::create([
+            'id' => Str::uuid(),
+            'company_id' => $company->id,
+            'store_id' => $store->id,
+            'product_number' => 'PROD-0004',
+            'product_code' => 'PEPSI-500',
+            'name' => 'Pepsi 500ml',
+            'description' => 'Pepsi Cola 500ml bottle',
+            'price' => 50.00,
+            'unit_cost' => 35.00,
+            'stock_quantity' => 380,
+            'category_id' => $category->id,
+            'supplier_id' => $supplier->id,
+            'unit_of_measurement' => 'bottle',
+        ]);
+
         // Create Customer
         $this->command->info('Creating customers...');
         Customer::create([
